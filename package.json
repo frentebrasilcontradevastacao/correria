@@ -7,9 +7,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test src/engine.test.mjs",
+    "audit:ui": "node scripts/auditar-ui.mjs",
+    "dados:tse": "node scripts/gerar-dados-tse.mjs"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
     "lucide-react": "0.383.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -18,6 +23,6 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "gh-pages": "^6.1.1",
-    "vite": "^5.4.0"
+    "vite": "^8.3.0"
   }
 }

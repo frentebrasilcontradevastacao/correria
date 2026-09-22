@@ -1,631 +1,61 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef, useContext, createContext } from "react";
 import {
   LayoutDashboard, Target, Filter, Map, Users, Radio, Calendar, Banknote,
-  Network, Dice5, Database, FileText, ChevronDown, ChevronRight, Info,
-  AlertTriangle, CheckCircle2, Settings2, Download, Save, Plus, Minus,
-  Building2, Vote, TrendingUp, TrendingDown, Layers, Compass, Menu,
-  RefreshCw, Sliders, BarChart3, Clock, Send, Handshake, Footprints,
-  DoorOpen, PartyPopper, Smartphone, MessageSquare, UsersRound, Award,
-  HelpCircle, X, ArrowRight, GitBranch, ChevronUp, Percent, ShieldCheck,
-  ClipboardList, Search,
+  Dice5, Database, FileText, ChevronDown, ChevronRight, Info,
+  AlertTriangle, CheckCircle2, Download, Save, Plus,
+  Menu, RefreshCw, Handshake, Footprints, DoorOpen, PartyPopper, Smartphone,
+  MessageSquare, UsersRound, X, ArrowRight, GitBranch, ShieldCheck,
+  Undo2, Redo2, RotateCcw, Trash2, Lock, ExternalLink,
 } from "lucide-react";
 import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  LineChart, Line, ScatterChart, Scatter, ZAxis, ComposedChart, Area, Legend,
-  ReferenceLine,
+  ResponsiveContainer, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  LineChart, Line, ScatterChart, Scatter, ZAxis, Legend,
+  ReferenceLine, BarChart,
 } from "recharts";
+import {
+  clamp01, safeDiv, isFiniteNum, fmtInt, fmtDec, fmtPct, fmtMoney, fmtSigned, fmtSig, fmtFaixa, uid,
+  defaultBounds,
+  PROV, UF_DATA, OFFICES, CHANNEL_DEFS, FUNNEL_STAGES_META,
+  FONTES, FONTE_DO_CAMPO, PROV_DO_CAMPO, ANOS_REFERENCIA, ELEITORADO_NACIONAL,
+  getMunicipiosDaUf, getParamsTerritorio, PARAMS_TERRITORIAIS_CAMPOS,
+  FAIXAS_ETARIAS_PADRAO, TEMATICAS_SUGERIDAS, SCENARIO_PRESETS, STORAGE_KEYS,
+  SOBRAS_PARTY_THRESHOLD,
+  defaultConfig, migrateConfig, computeAll, computeScenarioSummary, runMonteCarlo,
+  getUf, getVagas, getMunicipio, daysBetween, electionDates,
+} from "./engine.js";
+
+function cx(...args) { return args.filter(Boolean).join(" "); }
 
 /* ============================================================================
-   FUNIL REVERSO DE ELEIÇÃO
-   Calculadora + simulador + painel operacional de planejamento eleitoral.
-   Motor matemático (engines) separado da interface — cada bloco abaixo
-   corresponde a um módulo da seção 38 do briefing e é uma função pura.
-   ========================================================================== */
-
-/* ---------------------------- utilidades ---------------------------- */
-
-const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
-const safeDiv = (a, b) => (!b || !Number.isFinite(b) ? 0 : a / b);
-const isFiniteNum = (v) => typeof v === "number" && Number.isFinite(v);
-
-function fmtInt(n) {
-  if (!isFiniteNum(n)) return "—";
-  return Math.round(n).toLocaleString("pt-BR");
-}
-function fmtDec(n, digits = 1) {
-  if (!isFiniteNum(n)) return "—";
-  return n.toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
-function fmtPct(n, digits = 1) {
-  if (!isFiniteNum(n)) return "—";
-  return `${(n * 100).toLocaleString("pt-BR", { minimumFractionDigits: digits, maximumFractionDigits: digits })}%`;
-}
-function fmtMoney(n) {
-  if (!isFiniteNum(n)) return "—";
-  return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
-}
-function cx(...args) {
-  return args.filter(Boolean).join(" ");
-}
-let uidCounter = 0;
-function uid(prefix = "id") {
-  uidCounter += 1;
-  return `${prefix}_${Date.now().toString(36)}_${uidCounter}`;
-}
-
-/* ============================================================================
-   MOTOR DE CÁLCULO (engines) — funções puras, testáveis isoladamente.
-   ========================================================================== */
-
-const electorateEngine = {
-  turnoutFromAbstention: (abstentionRate) => clamp01(1 - clamp01(abstentionRate)),
-  effectiveElectorate: (eligibleElectorate, turnoutRate) => Math.max(0, eligibleElectorate) * clamp01(turnoutRate),
-};
-
-const funnelEngine = {
-  adjustedGoal: (voteGoal, fidelityRate, turnoutRate) => {
-    const denom = clamp01(fidelityRate) * clamp01(turnoutRate);
-    return denom > 0 ? Math.max(0, voteGoal) / denom : Infinity;
-  },
-  contactsForGoalShare: (adjustedGoal, share, conversionRate) => {
-    const goalShare = adjustedGoal * clamp01(share);
-    return conversionRate > 0 ? goalShare / conversionRate : Infinity;
-  },
-  dailyTarget: (operationalTotal, activeDays) => (activeDays > 0 ? operationalTotal / activeDays : Infinity),
-};
-
-const conversionEngine = {
-  chainMultiplier: (rates) => rates.reduce((acc, r) => acc * clamp01(r), 1),
-  actionsNeeded: (contactsNeeded, chainMultiplier) => (chainMultiplier > 0 ? contactsNeeded / chainMultiplier : Infinity),
-};
-
-const networkEngine = {
-  newContacts: (rawNetwork, activationRate, overlapRate) =>
-    Math.max(0, rawNetwork) * clamp01(activationRate) * (1 - clamp01(overlapRate)),
-  layeredReach: (baseCount, perLayerFanout, activationRate, overlapRate, layers) => {
-    let count = Math.max(0, baseCount);
-    const trail = [{ layer: 0, label: "Candidatura", count }];
-    const labels = ["Coordenação", "Lideranças", "Mobilizadores", "Eleitores"];
-    for (let i = 1; i <= layers; i++) {
-      count = networkEngine.newContacts(count * perLayerFanout, activationRate, overlapRate);
-      trail.push({ layer: i, label: labels[i - 1] || `Camada ${i}`, count });
-    }
-    return trail;
-  },
-};
-
-const territorialEngine = {
-  normalizeField: (territories, field) => {
-    const max = Math.max(...territories.map((t) => t[field] || 0), 0);
-    return territories.map((t) => (max > 0 ? (t[field] || 0) / max : 0));
-  },
-  weightedScore: (t, w) => {
-    const positive =
-      t.eleitoradoNorm * w.eleitorado +
-      t.historicoNorm * w.historico +
-      t.comparecimentoNorm * w.comparecimento +
-      t.presencaNorm * w.presenca +
-      t.capacidadeNorm * w.capacidade;
-    const penalty = t.logisticaNorm * w.logistica;
-    return Math.max(0, positive - penalty);
-  },
-  distributeGoal: (territories, weights, totalGoal) => {
-    const scores = territories.map((t) => territorialEngine.weightedScore(t, weights));
-    const sum = scores.reduce((a, b) => a + b, 0);
-    return territories.map((t, i) => ({
-      ...t,
-      score: scores[i],
-      share: sum > 0 ? scores[i] / sum : 0,
-      metaTerritorial: sum > 0 ? (scores[i] / sum) * totalGoal : 0,
-    }));
-  },
-};
-
-const capacityEngine = {
-  dailyCapacity: ({ mobilizadores = 0, horasDia = 0, contatosHora = 0, reunioesDia = 0, contatosPorReuniao = 0, eventosDia = 0, contatosPorEvento = 0 }) =>
-    mobilizadores * horasDia * contatosHora + reunioesDia * contatosPorReuniao + eventosDia * contatosPorEvento,
-  gap: (demand, capacity) => capacity - demand,
-  status: (demand, capacity) => {
-    if (demand <= 0) return "sem_demanda";
-    if (capacity <= 0) return "insuficiente";
-    const ratio = safeDiv(capacity, demand);
-    if (ratio < 0.9) return "insuficiente";
-    if (ratio <= 1.15) return "suficiente";
-    return "excedente";
-  },
-};
-
-const budgetEngine = {
-  totalCost: ({ totalContacts, custoPorContato, eventos, custoPorEvento, diasAtivos, custoLogisticoDia }) =>
-    totalContacts * custoPorContato + eventos * custoPorEvento + diasAtivos * custoLogisticoDia,
-  costPerSupport: (totalCost, adjustedGoal) => safeDiv(totalCost, adjustedGoal),
-};
-
-const SCENARIO_PRESETS = {
-  conservador: { id: "conservador", label: "Conservador", abstentionDelta: 0.05, fidelityDelta: -0.08, conversionMultiplier: 0.8, custom: false },
-  central: { id: "central", label: "Central", abstentionDelta: 0, fidelityDelta: 0, conversionMultiplier: 1, custom: false },
-  otimista: { id: "otimista", label: "Otimista", abstentionDelta: -0.05, fidelityDelta: 0.06, conversionMultiplier: 1.2, custom: false },
-  maior_mobilizacao: { id: "maior_mobilizacao", label: "Maior mobilização", abstentionDelta: -0.02, fidelityDelta: 0.03, conversionMultiplier: 1.1, capacityMultiplier: 1.4, custom: false },
-  menor_conversao: { id: "menor_conversao", label: "Menor conversão", abstentionDelta: 0.02, fidelityDelta: -0.02, conversionMultiplier: 0.65, custom: false },
-  restricao_territorial: { id: "restricao_territorial", label: "Restrição territorial", abstentionDelta: 0.03, fidelityDelta: -0.01, conversionMultiplier: 0.9, costMultiplier: 1.35, custom: false },
-};
-
-const scenarioEngine = {
-  apply: (baseAbstention, baseFidelity, preset) => ({
-    abstentionRate: clamp01(baseAbstention + (preset.abstentionDelta || 0)),
-    fidelityRate: clamp01(baseFidelity + (preset.fidelityDelta || 0)),
-    conversionMultiplier: preset.conversionMultiplier ?? 1,
-    capacityMultiplier: preset.capacityMultiplier ?? 1,
-    costMultiplier: preset.costMultiplier ?? 1,
-  }),
-};
-
-const historicalEngine = {
-  absoluteChange: (current, previous) => current - previous,
-  percentChange: (current, previous) => (previous > 0 ? (current - previous) / previous : null),
-};
-
-const electoralRuleEngine = {
-  quocienteEleitoral: (votosValidos, vagas) => safeDiv(votosValidos, Math.max(1, vagas)),
-  quocientePartidario: (votosPartido, qe) => (qe > 0 ? Math.floor(votosPartido / qe) : 0),
-  dhondtAllocation: (parties, totalSeats) => {
-    const seats = parties.map((p) => ({ ...p, seats: 0 }));
-    for (let s = 0; s < totalSeats; s++) {
-      let bestIdx = -1;
-      let bestQuotient = -1;
-      seats.forEach((p, idx) => {
-        const quotient = p.votes / (p.seats + 1);
-        if (quotient > bestQuotient) {
-          bestQuotient = quotient;
-          bestIdx = idx;
-        }
-      });
-      if (bestIdx >= 0) seats[bestIdx].seats += 1;
-    }
-    return seats;
-  },
-  estadualSeatsFromFederal: (federalSeats) => (federalSeats <= 12 ? federalSeats * 3 : 36 + (federalSeats - 12)),
-};
-
-function mulberry32(seed) {
-  let a = seed;
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function triangular(rng, min, mode, max) {
-  if (max <= min) return min;
-  const u = rng();
-  const c = clamp01((mode - min) / (max - min));
-  if (u < c) return min + Math.sqrt(u * (max - min) * (mode - min));
-  return max - Math.sqrt((1 - u) * (max - min) * (max - mode));
-}
-function percentile(sorted, p) {
-  const idx = clamp01(p) * (sorted.length - 1);
-  const lo = Math.floor(idx);
-  const hi = Math.ceil(idx);
-  if (lo === hi) return sorted[lo];
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
-}
-function runMonteCarlo({ voteGoal, abstentionBounds, fidelityBounds, conversionBounds, iterations = 3000, seed = 42 }) {
-  const rng = mulberry32(seed);
-  const adjustedGoals = [];
-  const contactsArr = [];
-  for (let i = 0; i < iterations; i++) {
-    const abst = triangular(rng, abstentionBounds.min, abstentionBounds.mode, abstentionBounds.max);
-    const fid = triangular(rng, fidelityBounds.min, fidelityBounds.mode, fidelityBounds.max);
-    const conv = triangular(rng, conversionBounds.min, conversionBounds.mode, conversionBounds.max);
-    const turnout = electorateEngine.turnoutFromAbstention(abst);
-    const adj = funnelEngine.adjustedGoal(voteGoal, fid, turnout);
-    adjustedGoals.push(adj);
-    contactsArr.push(safeDiv(adj, conv));
-  }
-  adjustedGoals.sort((a, b) => a - b);
-  contactsArr.sort((a, b) => a - b);
-  const pick = (arr) => ({
-    p10: percentile(arr, 0.1), p25: percentile(arr, 0.25), p50: percentile(arr, 0.5),
-    p75: percentile(arr, 0.75), p90: percentile(arr, 0.9), min: arr[0], max: arr[arr.length - 1],
-  });
-  return { adjustedGoal: pick(adjustedGoals), contacts: pick(contactsArr), iterations };
-}
-
-/* ============================================================================
-   DADOS — camada de dados. Os números abaixo são ILUSTRATIVOS/SINTÉTICOS,
-   usados apenas para demonstrar a arquitetura antes da conexão real com o
-   Portal de Dados Abertos do TSE (dadosabertos.tse.jus.br) e o IBGE. Nunca
-   tratar estes valores como dado oficial — ver módulo "Dados" no app.
-   ========================================================================== */
-
-const REGIOES = ["Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul"];
-
-// eleitorado em milhões (ordem de grandeza ilustrativa), vagas na Câmara dos
-// Deputados = composição vigente (dado histórico, confirmar resolução do TSE
-// para o pleito antes de uso real). Histórico 2022/2018 = comparecimento e
-// abstenção ilustrativos por UF.
-const UF_DATA = [
-  { code: "SP", name: "São Paulo", regiao: "Sudeste", eleitoradoM: 35.0, vagasCamara: 70, municipios: 645, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "MG", name: "Minas Gerais", regiao: "Sudeste", eleitoradoM: 16.5, vagasCamara: 53, municipios: 853, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "RJ", name: "Rio de Janeiro", regiao: "Sudeste", eleitoradoM: 13.0, vagasCamara: 46, municipios: 92, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "BA", name: "Bahia", regiao: "Nordeste", eleitoradoM: 11.2, vagasCamara: 39, municipios: 417, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "RS", name: "Rio Grande do Sul", regiao: "Sul", eleitoradoM: 8.8, vagasCamara: 31, municipios: 497, hist: { 2022: { comparecimento: 0.82, abstencao: 0.18 }, 2018: { comparecimento: 0.84, abstencao: 0.16 } } },
-  { code: "PR", name: "Paraná", regiao: "Sul", eleitoradoM: 8.4, vagasCamara: 30, municipios: 399, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "CE", name: "Ceará", regiao: "Nordeste", eleitoradoM: 7.1, vagasCamara: 22, municipios: 184, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "PE", name: "Pernambuco", regiao: "Nordeste", eleitoradoM: 7.0, vagasCamara: 25, municipios: 185, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "PA", name: "Pará", regiao: "Norte", eleitoradoM: 5.9, vagasCamara: 17, municipios: 144, hist: { 2022: { comparecimento: 0.74, abstencao: 0.26 }, 2018: { comparecimento: 0.76, abstencao: 0.24 } } },
-  { code: "SC", name: "Santa Catarina", regiao: "Sul", eleitoradoM: 5.7, vagasCamara: 16, municipios: 295, hist: { 2022: { comparecimento: 0.83, abstencao: 0.17 }, 2018: { comparecimento: 0.85, abstencao: 0.15 } } },
-  { code: "MA", name: "Maranhão", regiao: "Nordeste", eleitoradoM: 4.9, vagasCamara: 18, municipios: 217, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "GO", name: "Goiás", regiao: "Centro-Oeste", eleitoradoM: 4.8, vagasCamara: 17, municipios: 246, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "PB", name: "Paraíba", regiao: "Nordeste", eleitoradoM: 3.0, vagasCamara: 12, municipios: 223, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "ES", name: "Espírito Santo", regiao: "Sudeste", eleitoradoM: 2.9, vagasCamara: 10, municipios: 78, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "AM", name: "Amazonas", regiao: "Norte", eleitoradoM: 2.6, vagasCamara: 8, municipios: 62, hist: { 2022: { comparecimento: 0.72, abstencao: 0.28 }, 2018: { comparecimento: 0.74, abstencao: 0.26 } } },
-  { code: "RN", name: "Rio Grande do Norte", regiao: "Nordeste", eleitoradoM: 2.6, vagasCamara: 8, municipios: 167, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "MT", name: "Mato Grosso", regiao: "Centro-Oeste", eleitoradoM: 2.5, vagasCamara: 8, municipios: 141, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "PI", name: "Piauí", regiao: "Nordeste", eleitoradoM: 2.5, vagasCamara: 10, municipios: 224, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "AL", name: "Alagoas", regiao: "Nordeste", eleitoradoM: 2.3, vagasCamara: 9, municipios: 102, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "DF", name: "Distrito Federal", regiao: "Centro-Oeste", eleitoradoM: 2.2, vagasCamara: 8, municipios: 1, hist: { 2022: { comparecimento: 0.83, abstencao: 0.17 }, 2018: { comparecimento: 0.85, abstencao: 0.15 } } },
-  { code: "MS", name: "Mato Grosso do Sul", regiao: "Centro-Oeste", eleitoradoM: 1.9, vagasCamara: 8, municipios: 79, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "SE", name: "Sergipe", regiao: "Nordeste", eleitoradoM: 1.7, vagasCamara: 8, municipios: 75, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "RO", name: "Rondônia", regiao: "Norte", eleitoradoM: 1.2, vagasCamara: 8, municipios: 52, hist: { 2022: { comparecimento: 0.77, abstencao: 0.23 }, 2018: { comparecimento: 0.79, abstencao: 0.21 } } },
-  { code: "TO", name: "Tocantins", regiao: "Norte", eleitoradoM: 1.1, vagasCamara: 8, municipios: 139, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "AC", name: "Acre", regiao: "Norte", eleitoradoM: 0.6, vagasCamara: 8, municipios: 22, hist: { 2022: { comparecimento: 0.75, abstencao: 0.25 }, 2018: { comparecimento: 0.77, abstencao: 0.23 } } },
-  { code: "AP", name: "Amapá", regiao: "Norte", eleitoradoM: 0.55, vagasCamara: 8, municipios: 16, hist: { 2022: { comparecimento: 0.73, abstencao: 0.27 }, 2018: { comparecimento: 0.75, abstencao: 0.25 } } },
-  { code: "RR", name: "Roraima", regiao: "Norte", eleitoradoM: 0.4, vagasCamara: 8, municipios: 15, hist: { 2022: { comparecimento: 0.74, abstencao: 0.26 }, 2018: { comparecimento: 0.76, abstencao: 0.24 } } },
-];
-
-// Recorte ilustrativo de municípios de SP para demonstrar a profundidade
-// Estado -> Município -> Zona -> Local -> Seção no exemplo obrigatório
-// (Deputado Federal / SP). Demais UFs entram apenas em nível agregado até
-// que uma importação real do TSE seja conectada.
-const SP_MUNICIPIOS = [
-  { id: "sp-capital", name: "São Paulo (capital)", eleitoradoM: 9.4, zonas: 79, presenca: 0.55, capacidade: 0.6, logistica: 0.35 },
-  { id: "guarulhos", name: "Guarulhos", eleitoradoM: 1.0, zonas: 6, presenca: 0.4, capacidade: 0.45, logistica: 0.3 },
-  { id: "campinas", name: "Campinas", eleitoradoM: 0.9, zonas: 5, presenca: 0.5, capacidade: 0.55, logistica: 0.4 },
-  { id: "sbc", name: "São Bernardo do Campo", eleitoradoM: 0.65, zonas: 3, presenca: 0.45, capacidade: 0.5, logistica: 0.35 },
-  { id: "santo-andre", name: "Santo André", eleitoradoM: 0.58, zonas: 3, presenca: 0.4, capacidade: 0.45, logistica: 0.4 },
-  { id: "osasco", name: "Osasco", eleitoradoM: 0.55, zonas: 2, presenca: 0.35, capacidade: 0.4, logistica: 0.3 },
-  { id: "santos", name: "Santos", eleitoradoM: 0.34, zonas: 2, presenca: 0.5, capacidade: 0.5, logistica: 0.5 },
-  { id: "sjc", name: "São José dos Campos", eleitoradoM: 0.53, zonas: 2, presenca: 0.42, capacidade: 0.48, logistica: 0.45 },
-];
-
-const OFFICES = [
-  { id: "PRESIDENTE", label: "Presidente da República", tipo: "majoritario", nivel: "nacional", vice: "VICE_PRESIDENTE" },
-  { id: "VICE_PRESIDENTE", label: "Vice-Presidente", tipo: "chapa", nivel: "nacional", titular: "PRESIDENTE" },
-  { id: "GOVERNADOR", label: "Governador", tipo: "majoritario", nivel: "estadual", vice: "VICE_GOVERNADOR" },
-  { id: "VICE_GOVERNADOR", label: "Vice-Governador", tipo: "chapa", nivel: "estadual", titular: "GOVERNADOR" },
-  { id: "SENADOR", label: "Senador", tipo: "majoritario", nivel: "estadual" },
-  { id: "DEPUTADO_FEDERAL", label: "Deputado Federal", tipo: "proporcional", nivel: "estadual" },
-  { id: "DEPUTADO_ESTADUAL", label: "Deputado Estadual", tipo: "proporcional", nivel: "estadual" },
-  { id: "DEPUTADO_DISTRITAL", label: "Deputado Distrital", tipo: "proporcional", nivel: "estadual" },
-  { id: "PREFEITO", label: "Prefeito", tipo: "majoritario", nivel: "municipal", vice: "VICE_PREFEITO" },
-  { id: "VICE_PREFEITO", label: "Vice-Prefeito", tipo: "chapa", nivel: "municipal", titular: "PREFEITO" },
-  { id: "VEREADOR", label: "Vereador", tipo: "proporcional", nivel: "municipal" },
-];
-
-const FUNNEL_STAGES_META = [
-  { key: "meta", label: "Meta de votos", prov: "premissa" },
-  { key: "ajustada", label: "Meta ajustada", prov: "estimativa" },
-  { key: "apoios", label: "Apoios necessários", prov: "estimativa" },
-  { key: "eleitoresAlvo", label: "Eleitores-alvo", prov: "estimativa" },
-  { key: "segmentos", label: "Segmentos eleitorais", prov: "premissa" },
-  { key: "territorios", label: "Territórios prioritários", prov: "estimativa" },
-  { key: "canais", label: "Canais de contato", prov: "premissa" },
-  { key: "contatos", label: "Contatos necessários", prov: "estimativa" },
-  { key: "atividades", label: "Atividades necessárias", prov: "estimativa" },
-  { key: "equipe", label: "Equipe necessária", prov: "estimativa" },
-  { key: "dias", label: "Dias disponíveis", prov: "premissa" },
-  { key: "metaDiaria", label: "Meta diária", prov: "estimativa" },
-  { key: "metaAgente", label: "Meta por agente/mobilizador", prov: "estimativa" },
-];
-
-// Canais de conversão — cada um com cadeia própria (nunca uma taxa média
-// única, conforme seção 9/41 do briefing).
-const CHANNEL_DEFS = [
-  {
-    id: "liderancas", label: "Lideranças / rede organizada", icon: "Handshake", unit: "lideranças ativadas",
-    defaultShare: 0, defaultConversion: 0.20,
-    fields: [
-      { key: "contatosPorLideranca", label: "Contatos potenciais por liderança", def: 30, min: 5, max: 100, step: 1 },
-      { key: "taxaAtivacao", label: "Taxa de ativação", def: 0.6, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaSobreposicao", label: "Taxa de sobreposição/duplicação", def: 0.25, min: 0, max: 0.9, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.contatosPorLideranca * p.taxaAtivacao * (1 - p.taxaSobreposicao),
-  },
-  {
-    id: "reunioes", label: "Reuniões", icon: "UsersRound", unit: "reuniões",
-    defaultShare: 0, defaultConversion: 0.50,
-    fields: [
-      { key: "participantesPorReuniao", label: "Participantes por reunião", def: 25, min: 5, max: 300, step: 1 },
-      { key: "contatosPorParticipante", label: "Contatos indicados por participante", def: 3, min: 0, max: 20, step: 0.5 },
-      { key: "fidelidade", label: "Fidelidade dos contatos indicados", def: 0.7, min: 0, max: 1, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.participantesPorReuniao * p.contatosPorParticipante * p.fidelidade,
-  },
-  {
-    id: "corpoACorpo", label: "Corpo a corpo", icon: "Footprints", unit: "abordagens",
-    defaultShare: 1, defaultConversion: 0.15,
-    fields: [
-      { key: "taxaContatoValido", label: "Taxa de contato válido por abordagem", def: 0.65, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaRetorno", label: "Taxa de retorno / repetição (informativo)", def: 0.3, min: 0, max: 1, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.taxaContatoValido,
-  },
-  {
-    id: "portaAPorta", label: "Porta a porta", icon: "DoorOpen", unit: "domicílios",
-    defaultShare: 0, defaultConversion: 0.12,
-    fields: [
-      { key: "pessoasPorDomicilio", label: "Pessoas por domicílio", def: 2.4, min: 1, max: 8, step: 0.1 },
-      { key: "taxaContato", label: "Taxa de contato (porta aberta)", def: 0.55, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaReceptividade", label: "Taxa de receptividade", def: 0.6, min: 0, max: 1, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.pessoasPorDomicilio * p.taxaContato * p.taxaReceptividade,
-  },
-  {
-    id: "eventos", label: "Eventos", icon: "PartyPopper", unit: "eventos",
-    defaultShare: 0, defaultConversion: 0.10,
-    fields: [
-      { key: "participantesPorEvento", label: "Participantes por evento", def: 120, min: 10, max: 5000, step: 10 },
-      { key: "contatosPorParticipante", label: "Contatos qualificados por participante", def: 2, min: 0, max: 10, step: 0.1 },
-    ],
-    chain: (p) => p.participantesPorEvento * p.contatosPorParticipante,
-  },
-  {
-    id: "digital", label: "Digital", icon: "Smartphone", unit: "impressões",
-    defaultShare: 0, defaultConversion: 0.02,
-    fields: [
-      { key: "taxaAlcance", label: "Alcance / impressão", def: 0.4, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaEngajamento", label: "Cliques / visualização", def: 0.05, min: 0, max: 1, step: 0.001, pct: true },
-      { key: "taxaLead", label: "Leads / clique", def: 0.2, min: 0, max: 1, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.taxaAlcance * p.taxaEngajamento * p.taxaLead,
-  },
-  {
-    id: "whatsapp", label: "WhatsApp / SMS / e-mail", icon: "MessageSquare", unit: "mensagens",
-    defaultShare: 0, defaultConversion: 0.06,
-    fields: [
-      { key: "taxaEntrega", label: "Taxa de entrega", def: 0.9, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaResposta", label: "Taxa de resposta", def: 0.18, min: 0, max: 1, step: 0.01, pct: true },
-      { key: "taxaQualificacao", label: "Taxa de qualificação", def: 0.4, min: 0, max: 1, step: 0.01, pct: true },
-    ],
-    chain: (p) => p.taxaEntrega * p.taxaResposta * p.taxaQualificacao,
-  },
-];
-
-const ICONS = {
-  Handshake, UsersRound, Footprints, DoorOpen, PartyPopper, Smartphone, MessageSquare,
-};
-
-function defaultChannelState() {
-  const state = {};
-  CHANNEL_DEFS.forEach((c) => {
-    const params = {};
-    c.fields.forEach((f) => { params[f.key] = f.def; });
-    state[c.id] = { enabled: true, share: c.defaultShare, conversion: c.defaultConversion, params };
-  });
-  return state;
-}
-
-const STORAGE_KEYS = {
-  models: "modelos-planejamento-v1",
-  log: "registro-operacional-v1",
-  lastConfig: "config-atual-v1",
-};
-
-function defaultConfig() {
-  return {
-    eleicaoAno: 2026,
-    office: "DEPUTADO_FEDERAL",
-    uf: "SP",
-    municipioId: "sp-capital",
-    scenarioId: "central",
-    voteGoal: 110000,
-    campaignDays: 45,
-    abstentionRate: 0.20,
-    fidelityRate: 0.85,
-    channels: defaultChannelState(),
-    network: { numLiderancas: 400, fanout: 30, taxaAtivacao: 0.6, taxaSobreposicao: 0.25, camadas: 3 },
-    territorialWeights: { eleitorado: 0.40, historico: 0.20, comparecimento: 0.10, presenca: 0.15, capacidade: 0.10, logistica: 0.05 },
-    territoriosSelecionados: SP_MUNICIPIOS.map((m) => m.id),
-    team: { coordenadores: 8, mobilizadores: 180, horasDia: 3, contatosHora: 6, reunioesDia: 4, contatosPorReuniao: 25, eventosDia: 0.3, contatosPorEvento: 150 },
-    agenda: { dataInicio: "2026-08-18", dataFim: "2026-10-04", diasRua: 30, diasDigitais: 45, diasEventos: 10, diasDescanso: 3 },
-    budget: { custoPorContato: 0.8, custoPorEvento: 4000, custoLogisticoDia: 1200, orcamentoTotal: 800000 },
-    customScenarios: [],
-    proportional: {
-      vagas: 70, votosValidosCircunscricao: 22000000, votosPartido: 900000, limiarIndividualPercent: 0.10,
-      concorrentes: [
-        { id: uid("c"), nome: "Candidato A (mesma legenda)", votos: 180000 },
-        { id: uid("c"), nome: "Candidato B (mesma legenda)", votos: 95000 },
-      ],
-      outrosPartidos: [
-        { id: uid("p"), nome: "Federação X", votos: 3200000 },
-        { id: uid("p"), nome: "Federação Y", votos: 2650000 },
-        { id: uid("p"), nome: "Partido Z", votos: 1450000 },
-      ],
-    },
-    majoritario: { segundoTurno: true, margemSeguranca: 0.05 },
-  };
-}
-
-/* ============================================================================
-   computeAll — orquestra os engines acima. Puro em relação a `cfg`; a UI
-   apenas lê o resultado. Pode ser extraído para um serviço de backend sem
-   alterações (ver módulo "Motor de cálculo", seção 38 do briefing).
-   ========================================================================== */
-
-function getScenarioPreset(cfg) {
-  if (SCENARIO_PRESETS[cfg.scenarioId]) return SCENARIO_PRESETS[cfg.scenarioId];
-  const custom = (cfg.customScenarios || []).find((s) => s.id === cfg.scenarioId);
-  return custom || SCENARIO_PRESETS.central;
-}
-
-function getOffice(cfg) {
-  return OFFICES.find((o) => o.id === cfg.office) || OFFICES[0];
-}
-
-function getUf(cfg) {
-  return UF_DATA.find((u) => u.code === cfg.uf) || UF_DATA[0];
-}
-
-function buildTerritories(cfg) {
-  const uf = getUf(cfg);
-  if (cfg.uf === "SP") {
-    const list = SP_MUNICIPIOS.filter((m) => cfg.territoriosSelecionados.includes(m.id));
-    const base = list.length ? list : SP_MUNICIPIOS;
-    const eleitoradoNorm = territorialEngine.normalizeField(base, "eleitoradoM");
-    const presencaNorm = territorialEngine.normalizeField(base, "presenca");
-    const capacidadeNorm = territorialEngine.normalizeField(base, "capacidade");
-    const logisticaNorm = territorialEngine.normalizeField(base, "logistica");
-    const hist2022 = uf.hist[2022].comparecimento;
-    return base.map((m, i) => {
-      // pequena variação ilustrativa por município em torno da média estadual —
-      // ainda sintética, apenas evita repetir o mesmo valor em todas as linhas.
-      const localComparecimento = clamp01(hist2022 + (m.presenca - 0.45) * 0.06);
-      return {
-        id: m.id, name: m.name, eleitoradoM: m.eleitoradoM,
-        eleitoradoNorm: eleitoradoNorm[i], historicoNorm: localComparecimento, comparecimentoNorm: localComparecimento,
-        presencaNorm: presencaNorm[i], capacidadeNorm: capacidadeNorm[i], logisticaNorm: logisticaNorm[i],
-      };
-    });
-  }
-  // Demais UFs: nível agregado único até conexão real com dados municipais.
-  return [{
-    id: uf.code, name: uf.name, eleitoradoM: uf.eleitoradoM,
-    eleitoradoNorm: 1, historicoNorm: uf.hist[2022].comparecimento, comparecimentoNorm: uf.hist[2022].comparecimento,
-    presencaNorm: 0.5, capacidadeNorm: 0.5, logisticaNorm: 0.3,
-  }];
-}
-
-function computeAll(cfg) {
-  const office = getOffice(cfg);
-  const uf = getUf(cfg);
-  const preset = getScenarioPreset(cfg);
-  const scenario = scenarioEngine.apply(cfg.abstentionRate, cfg.fidelityRate, preset);
-  const turnoutRate = electorateEngine.turnoutFromAbstention(scenario.abstentionRate);
-  const adjustedGoal = funnelEngine.adjustedGoal(cfg.voteGoal, scenario.fidelityRate, turnoutRate);
-
-  const channelResults = CHANNEL_DEFS.map((def) => {
-    const st = cfg.channels[def.id];
-    const conversion = clamp01(st.conversion * scenario.conversionMultiplier);
-    const contactsNeeded = st.enabled ? funnelEngine.contactsForGoalShare(adjustedGoal, st.share, conversion) : 0;
-    const chainMultiplier = def.chain(st.params);
-    const actionsNeeded = st.enabled ? conversionEngine.actionsNeeded(contactsNeeded, chainMultiplier) : 0;
-    return { ...def, enabled: st.enabled, share: st.share, conversion, contactsNeeded, chainMultiplier, actionsNeeded, params: st.params };
-  });
-  const totalContactsNeeded = channelResults.reduce((a, c) => a + c.contactsNeeded, 0);
-  const enabledShareSum = channelResults.filter((c) => c.enabled).reduce((a, c) => a + c.share, 0);
-
-  const networkTrail = networkEngine.layeredReach(cfg.network.numLiderancas, cfg.network.fanout, cfg.network.taxaAtivacao, cfg.network.taxaSobreposicao, cfg.network.camadas);
-  const networkFinalReach = networkTrail[networkTrail.length - 1]?.count || 0;
-
-  const dailyContacts = funnelEngine.dailyTarget(totalContactsNeeded, cfg.campaignDays);
-  const weeklyContacts = isFiniteNum(dailyContacts) ? dailyContacts * 7 : Infinity;
-
-  const territoriesRaw = buildTerritories(cfg);
-  const territories = territorialEngine.distributeGoal(territoriesRaw, cfg.territorialWeights, adjustedGoal);
-  const weightSum = Object.values(cfg.territorialWeights).reduce((a, b) => a + b, 0);
-
-  const dailyCapacityBase = capacityEngine.dailyCapacity(cfg.team);
-  const dailyCapacity = dailyCapacityBase * (scenario.capacityMultiplier || 1);
-  const capacityGap = capacityEngine.gap(dailyContacts, dailyCapacity);
-  const capacityStatus = capacityEngine.status(dailyContacts, dailyCapacity);
-
-  const eventosTotal = (cfg.team.eventosDia || 0) * cfg.campaignDays;
-  const totalCostBase = budgetEngine.totalCost({
-    totalContacts: totalContactsNeeded, custoPorContato: cfg.budget.custoPorContato,
-    eventos: eventosTotal, custoPorEvento: cfg.budget.custoPorEvento,
-    diasAtivos: cfg.campaignDays, custoLogisticoDia: cfg.budget.custoLogisticoDia,
-  });
-  const totalCost = totalCostBase * (scenario.costMultiplier || 1);
-  const costPerSupport = budgetEngine.costPerSupport(totalCost, adjustedGoal);
-  const budgetGap = cfg.budget.orcamentoTotal - totalCost;
-
-  const metaPorEquipe = safeDiv(totalContactsNeeded, Math.max(1, cfg.team.coordenadores));
-  const metaPorMobilizador = safeDiv(dailyContacts, Math.max(1, cfg.team.mobilizadores));
-
-  // Módulo proporcional
-  let proportionalResult = null;
-  if (office.tipo === "proporcional") {
-    const qe = electoralRuleEngine.quocienteEleitoral(cfg.proportional.votosValidosCircunscricao, cfg.proportional.vagas);
-    const qp = electoralRuleEngine.quocientePartidario(cfg.proportional.votosPartido, qe);
-    const limiarIndividual = qe * (cfg.proportional.limiarIndividualPercent ?? 0.10);
-    const allParties = [
-      { id: "own", name: "Minha legenda", votes: cfg.proportional.votosPartido },
-      ...cfg.proportional.outrosPartidos.map((p) => ({ id: p.id, name: p.nome, votes: p.votos })),
-    ];
-    const allocation = electoralRuleEngine.dhondtAllocation(allParties, cfg.proportional.vagas);
-    const ownSeats = allocation.find((a) => a.id === "own")?.seats || 0;
-    const totalConcorrentesVotos = cfg.proportional.concorrentes.reduce((a, c) => a + c.votos, 0) + cfg.voteGoal;
-    const faixaInternaShare = safeDiv(cfg.voteGoal, totalConcorrentesVotos);
-    proportionalResult = { qe, qp, limiarIndividual, allocation, ownSeats, faixaInternaShare, totalConcorrentesVotos };
-  }
-
-  let majoritarioResult = null;
-  if (office.tipo === "majoritario") {
-    majoritarioResult = {
-      minVotosSeguranca: adjustedGoal * (1 + (cfg.majoritario?.margemSeguranca || 0)),
-      segundoTurno: !!cfg.majoritario?.segundoTurno,
-    };
-  }
-
-  // Alertas (secao 25)
-  const alerts = [];
-  if (!isFiniteNum(dailyContacts) || cfg.campaignDays <= 0) {
-    alerts.push({ level: "critico", text: "Meta diária impossível: número de dias de campanha insuficiente ou igual a zero." });
-  }
-  if (capacityStatus === "insuficiente") {
-    alerts.push({ level: "critico", text: `Capacidade operacional diária (${fmtInt(dailyCapacity)} contatos) abaixo da demanda diária (${fmtInt(dailyContacts)} contatos).` });
-  }
-  if (totalCost > cfg.budget.orcamentoTotal) {
-    alerts.push({ level: "atencao", text: `Custo estimado (${fmtMoney(totalCost)}) acima do orçamento disponível (${fmtMoney(cfg.budget.orcamentoTotal)}).` });
-  }
-  const maxChannelShare = channelResults.filter((c) => c.enabled).reduce((max, c) => Math.max(max, c.share), 0);
-  if (maxChannelShare > 0.6) {
-    const dep = channelResults.find((c) => c.share === maxChannelShare);
-    alerts.push({ level: "atencao", text: `Excesso de dependência de um único canal (${dep?.label}, ${fmtPct(maxChannelShare)} da meta).` });
-  }
-  if (Math.abs(enabledShareSum - 1) > 0.01) {
-    alerts.push({ level: "atencao", text: `A soma das participações dos canais é ${fmtPct(enabledShareSum)} (deveria ser 100%).` });
-  }
-  if (Math.abs(weightSum - 1) > 0.01) {
-    alerts.push({ level: "atencao", text: `A soma dos pesos territoriais é ${fmtPct(weightSum)} (deveria ser 100%).` });
-  }
-  alerts.push({ level: "info", text: "Dados territoriais e históricos desta demonstração são sintéticos — conecte o Portal de Dados Abertos do TSE e o IBGE antes de uso operacional real." });
-
-  return {
-    office, uf, preset, scenario, turnoutRate, adjustedGoal, channelResults, totalContactsNeeded,
-    enabledShareSum, networkTrail, networkFinalReach, dailyContacts, weeklyContacts, territories,
-    weightSum, dailyCapacity, dailyCapacityBase, capacityGap, capacityStatus, totalCost, totalCostBase,
-    costPerSupport, budgetGap, metaPorEquipe, metaPorMobilizador, proportionalResult, majoritarioResult, alerts,
-  };
-}
-
-/* ============================================================================
-   ESTILO — sistema visual próprio (institucional, alta densidade, desktop-
-   first). IBM Plex Sans para texto, IBM Plex Mono para todo dado numérico —
-   a intenção é que qualquer número na tela pareça medido, não decorado.
+   STYLE — house visual system: institutional, high density.
+   Every text token clears WCAG AA (4.5:1) against the background it is
+   actually used on.
    ========================================================================== */
 
 const STYLE = `
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
-
 .fr-app {
-  --ink: #10162B; --ink-2: #1A2340; --ink-3: #2B3560; --ink-line: #34406E;
-  --paper: #F2F3F6; --card: #FFFFFF; --line: #E1E4EA; --line-2: #ECEEF2;
-  --text: #14182B; --text-soft: #5A6178; --text-faint: #9096AA;
-  --invert: #EDEFF7; --invert-soft: #A6ACC6;
-  --brand: #21418F; --brand-deep: #16305F; --brand-soft: #E7ECF9;
-  --gold: #AD8324; --gold-soft: #F6EEDA;
-  --oficial: #187A56; --oficial-soft: #E1F3EB;
-  --historico: #6A5AA8; --historico-soft: #ECE7F8;
-  --premissa: #B9821F; --premissa-soft: #F8EFD9;
-  --estimativa: #3D6BA8; --estimativa-soft: #E6EDF7;
-  --danger: #B3271E; --danger-soft: #FBE8E6;
-  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  /* Institutional shell: near-black graphite, neutral (chroma ~0). */
+  --ink: #191B1F; --ink-2: #26292F; --ink-3: #343841; --ink-line: #2E323A;
+  /* Truly neutral paper: no blue cast, no cream. */
+  --paper: #F0F0F1; --card: #FFFFFF; --surface-2: #F7F7F8;
+  --line: #DBDBDE; --line-2: #EAEAEC;
+  --text: #1A1B1F; --text-soft: #4B4D53; --text-faint: #5E6066;
+  --invert: #EDEDEE; --invert-soft: #B8BAC0;
+  /* Institutional brass. */
+  --brand: #856616; --brand-deep: #634C0F; --brand-soft: #F3ECDA;
+  --gold: #D6A93C;
+  /* An assumption is a typed-in value, not a warning: it reads neutral, and
+     amber is reserved for actual warnings. */
+  --oficial: #1A6B4C; --oficial-ink: #12523A; --oficial-soft: #E2EFE9;
+  --historico: #5B4E92; --historico-ink: #4A3E7E; --historico-soft: #EAE7F5;
+  --premissa: #565A66; --premissa-ink: #3D414B; --premissa-soft: #ECEDEF;
+  --estimativa: #2F5D96; --estimativa-ink: #274E7E; --estimativa-soft: #E6EDF6;
+  --warn: #9A7413; --warn-ink: #6F540D; --warn-soft: #F8EFD6; --warn-line: #E0CB93;
+  --danger: #A62B21; --danger-ink: #8A241C; --danger-soft: #FAE9E7; --danger-line: #E5BCB7;
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  --r-sm: 3px; --r-md: 6px;
+  /* Geometria de instrumento: quase reta, nada arredondado. */
+  --r-sm: 2px; --r-md: 3px;
   font-family: var(--font-sans);
   color: var(--text);
   background: var(--paper);
@@ -633,12 +63,16 @@ const STYLE = `
   min-height: 100vh;
   display: flex;
   position: relative;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .fr-app, .fr-app * { box-sizing: border-box; }
-.fr-app *:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.fr-app *:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 2px; }
 .fr-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .fr-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.fr-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
 
 /* ---------- sidebar ---------- */
 .fr-sidebar {
@@ -647,209 +81,404 @@ const STYLE = `
   display: flex; flex-direction: column; z-index: 20;
 }
 .fr-brand-block { padding: 20px 18px 16px; border-bottom: 1px solid var(--ink-line); }
-.fr-brand-name { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--invert); }
-.fr-brand-sub { font-size: 10.5px; color: var(--invert-soft); margin-top: 6px; line-height: 1.4; }
-.fr-nav { flex: 1; padding: 10px 10px; overflow-y: auto; }
+.fr-brand-name { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: none; color: var(--invert); }
+.fr-brand-sub { font-size: 12px; color: var(--invert-soft); margin-top: 6px; line-height: 1.45; }
+.fr-nav { flex: 1; padding: 10px; overflow-y: auto; }
 .fr-nav-item {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   padding: 9px 10px; border-radius: var(--r-sm); border: none; background: transparent;
-  color: var(--invert-soft); font-family: var(--font-sans); font-size: 12.5px; font-weight: 500;
+  color: var(--invert-soft); font-family: var(--font-sans); font-size: 13px; font-weight: 400;
   cursor: pointer; margin-bottom: 2px; transition: background 0.12s ease, color 0.12s ease;
   position: relative;
 }
-.fr-nav-item:hover { background: var(--ink-2); color: var(--invert); }
-.fr-nav-item.active { background: var(--ink-2); color: #fff; }
+.fr-nav-item:hover { background: var(--ink-2); color: #fff; }
+.fr-nav-item.active { background: var(--ink-2); color: #fff; font-weight: 600; }
 .fr-nav-item.active::before {
   content: ""; position: absolute; left: -10px; top: 6px; bottom: 6px; width: 3px;
-  background: var(--gold); border-radius: 0 2px 2px 0;
+  background: var(--gold); border-radius: 0;
 }
-.fr-nav-item svg { flex: 0 0 auto; opacity: 0.9; }
+.fr-nav-item svg { flex: 0 0 auto; }
 .fr-sidebar-foot { padding: 12px 18px 16px; border-top: 1px solid var(--ink-line); }
 .fr-mode-toggle { display: flex; background: var(--ink-2); border-radius: var(--r-sm); padding: 3px; gap: 2px; }
-.fr-mode-btn { flex: 1; padding: 6px 4px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em; border: none; background: transparent; color: var(--invert-soft); border-radius: 3px; cursor: pointer; }
+.fr-mode-btn { flex: 1; padding: 7px 4px; font-size: 12px; font-weight: 600; letter-spacing: 0; border: none; background: transparent; color: var(--invert-soft); border-radius: var(--r-sm); cursor: pointer; font-family: var(--font-sans); }
 .fr-mode-btn.active { background: var(--brand); color: #fff; }
+.fr-mode-note { font-size: 11px; color: var(--invert-soft); margin-top: 8px; line-height: 1.4; }
 
 /* ---------- main / topbar ---------- */
 .fr-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .fr-topbar {
-  position: sticky; top: 0; z-index: 15; background: var(--card); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 15; background: var(--surface-2); border-bottom: 1px solid var(--line);
   padding: 10px 22px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .fr-ctx-pill {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line);
-  border-radius: var(--r-sm); background: var(--paper); font-size: 11.5px; color: var(--text-soft);
+  border-radius: var(--r-sm); background: var(--card); font-size: 12px; color: var(--text-soft);
 }
-.fr-ctx-pill label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); }
+.fr-ctx-pill label { font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
 .fr-ctx-pill select, .fr-ctx-pill input {
-  border: none; background: transparent; font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  border: none; background: transparent; font-family: var(--font-mono); font-size: 13px; font-weight: 600;
   color: var(--text); cursor: pointer;
 }
 .fr-topbar-spacer { flex: 1; }
 .fr-content { padding: 22px 26px 60px; max-width: 1360px; width: 100%; margin: 0 auto; }
 
-/* ---------- generic building blocks ---------- */
+/* ---------- generic blocks ---------- */
 .fr-section-head { margin-bottom: 16px; }
-.fr-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); margin-bottom: 4px; }
-.fr-h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 4px; }
-.fr-h2 { font-size: 15px; font-weight: 700; margin: 0 0 2px; }
-.fr-desc { font-size: 12.5px; color: var(--text-soft); max-width: 640px; }
+/* A quiet label. A coloured, tracked, uppercase kicker over all 13 views is
+   the most copied scaffold there is. */
+.fr-eyebrow { font-family: var(--font-mono); font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-faint); margin-bottom: 5px; }
+.fr-h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 5px; text-wrap: balance; }
+.fr-h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.005em; margin: 0 0 2px; }
+.fr-desc { font-size: 13px; color: var(--text-soft); max-width: 680px; text-wrap: pretty; }
 .fr-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px 18px; }
 .fr-grid { display: grid; gap: 14px; }
 .fr-grid-2 { grid-template-columns: repeat(2, 1fr); }
 .fr-grid-3 { grid-template-columns: repeat(3, 1fr); }
 .fr-grid-4 { grid-template-columns: repeat(4, 1fr); }
 .fr-grid-5 { grid-template-columns: repeat(5, 1fr); }
+/* These two replace inline style={{gridTemplateColumns}}, which beat the media
+   queries and kept two cramped columns on a phone. */
+.fr-grid-split { grid-template-columns: 1.3fr 1fr; align-items: start; }
+.fr-grid-half { grid-template-columns: 1fr 1fr; align-items: start; }
 .fr-row { display: flex; align-items: center; gap: 10px; }
+.fr-row-wrap { flex-wrap: wrap; }
+.fr-between { justify-content: space-between; }
 .fr-stack { display: flex; flex-direction: column; gap: 14px; }
-.fr-divider { height: 1px; background: var(--line); margin: 14px 0; border: none; }
-.fr-hint { font-size: 11px; color: var(--text-faint); }
+.fr-divider { height: 1px; background: var(--line-2); margin: 14px 0; border: none; }
+.fr-hint { font-size: 12px; color: var(--text-faint); }
+.fr-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; padding: 2px 0; }
 
-/* ---------- provenance badges ---------- */
-.fr-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2.5px 7px; border-radius: 20px; white-space: nowrap; }
-.fr-badge .dot { width: 6px; height: 6px; border-radius: 50%; }
-.fr-badge.oficial { background: var(--oficial-soft); color: var(--oficial); }
+/* ---------- provenance badges ----------
+   Etiqueta quadrada, caixa-baixa. "Estimativa" é o valor padrão e aparecia
+   8x na mesma tela como pílula colorida: virou texto silencioso com ponto,
+   para que só a EXCEÇÃO (histórico, premissa, perigo) carregue marcação. */
+.fr-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; padding: 2px 7px; border-radius: var(--r-sm); white-space: nowrap; }
+.fr-badge .dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.fr-badge.oficial { background: var(--oficial-soft); color: var(--oficial-ink); }
 .fr-badge.oficial .dot { background: var(--oficial); }
-.fr-badge.historico { background: var(--historico-soft); color: var(--historico); }
+.fr-badge.historico { background: var(--historico-soft); color: var(--historico-ink); }
 .fr-badge.historico .dot { background: var(--historico); }
-.fr-badge.premissa { background: var(--premissa-soft); color: var(--premissa); }
+.fr-badge.premissa { background: var(--premissa-soft); color: var(--premissa-ink); }
 .fr-badge.premissa .dot { background: var(--premissa); }
-.fr-badge.estimativa { background: var(--estimativa-soft); color: var(--estimativa); }
+.fr-badge.estimativa { background: transparent; color: var(--text-faint); font-weight: 400; padding: 2px 0; }
 .fr-badge.estimativa .dot { background: var(--estimativa); }
+.fr-badge.perigo { background: var(--danger-soft); color: var(--danger-ink); }
+.fr-badge.perigo .dot { background: var(--danger); }
 
 /* ---------- kpi ---------- */
 .fr-kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.fr-kpi-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
-.fr-kpi-value { font-family: var(--font-mono); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
-.fr-kpi-sub { font-size: 11px; color: var(--text-soft); }
+.fr-kpi-label { font-size: 13px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-soft); }
+.fr-kpi-value { font-family: var(--font-mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--text); overflow-wrap: anywhere; }
+.fr-kpi-sub { font-size: 12px; color: var(--text-faint); }
 
-/* ---------- formula disclosure ---------- */
-.fr-disclosure { border: 1px dashed var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.fr-disclosure-btn { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 8px 10px; background: var(--paper); border: none; cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--brand); }
-.fr-disclosure-body { padding: 10px 12px; font-size: 12px; color: var(--text-soft); background: #fff; border-top: 1px dashed var(--line); }
-.fr-formula-box { font-family: var(--font-mono); font-size: 12px; background: var(--ink); color: var(--invert); padding: 8px 10px; border-radius: var(--r-sm); margin: 6px 0; overflow-x: auto; white-space: pre; }
+/* ---------- provenance: source, method and link ---------- */
+.fr-info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--card); color: var(--text-faint);
+  cursor: pointer; flex: 0 0 auto; transition: border-color 0.12s ease, color 0.12s ease;
+}
+.fr-info-btn:hover, .fr-info-btn[aria-expanded="true"] { border-color: var(--brand); color: var(--brand); }
+.fr-link-btn {
+  border: none; background: none; padding: 0; font: inherit; color: var(--brand);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.fr-link-btn:hover { color: var(--brand-deep); }
+.fr-export-status {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--surface-2); font-size: 12px; min-height: 34px;
+  display: flex; align-items: center;
+}
+.fr-export-ok { display: inline-flex; align-items: center; gap: 7px; color: var(--oficial-ink); }
+.fr-export-ok svg { flex: 0 0 auto; }
+.fr-cenario-efeito {
+  margin-top: 14px; padding: 12px 14px; border: 1px solid var(--brand);
+  border-radius: var(--r-md); background: var(--brand-soft); font-size: 13px;
+}
+.fr-cenario-efeito .fr-hint { color: var(--brand-deep); }
+.fr-kpi-faixa {
+  font-family: var(--font-mono); font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
+  line-height: 1.25; color: var(--text); white-space: nowrap;
+}
+.fr-kpi-faixa .ate { color: var(--text-faint); font-weight: 400; padding: 0 3px; }
+@media (max-width: 1240px) { .fr-export-status {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--surface-2); font-size: 12px; min-height: 34px;
+  display: flex; align-items: center;
+}
+.fr-export-ok { display: inline-flex; align-items: center; gap: 7px; color: var(--oficial-ink); }
+.fr-export-ok svg { flex: 0 0 auto; }
+.fr-cenario-efeito {
+  margin-top: 14px; padding: 12px 14px; border: 1px solid var(--brand);
+  border-radius: var(--r-md); background: var(--brand-soft); font-size: 13px;
+}
+.fr-cenario-efeito .fr-hint { color: var(--brand-deep); }
+.fr-kpi-faixa { font-size: 15px; } }
+.fr-kpi-detalhe { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-2); font-size: 12px; color: var(--text-soft); }
+.fr-fonte { font-size: 12px; color: var(--text-soft); }
+.fr-fonte-linha { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid var(--line-2); }
+.fr-fonte-linha:last-of-type { border-bottom: none; }
+.fr-fonte-linha span { color: var(--text-faint); }
+.fr-fonte-linha b { text-align: right; font-weight: 500; color: var(--text); }
+.fr-fonte-metodo { margin-top: 8px; padding: 8px 10px; background: var(--surface-2); border-radius: var(--r-sm); line-height: 1.5; }
+.fr-app a { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
+.fr-app a:hover { color: var(--brand-deep); }
+.fr-param-input {
+  width: 46px; font-family: var(--font-mono); font-size: 12px; padding: 3px 5px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff; color: var(--text); text-align: right;
+}
+.fr-param-input:hover { border-color: #C2C2C6; }
+.fr-th-premissa { color: var(--premissa-ink) !important; }
+/* The territory name neither wraps over three lines nor monopolises the
+   width: past 22ch it ellipsizes, with the full name in the title. */
+.fr-table td:first-child, .fr-table th:first-child { white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
+.fr-table thead tr:first-child th[colspan] { text-align: center; border-bottom: none; padding-bottom: 2px; }
+
+/* ---------- formulas ---------- */
+.fr-disclosure { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
+.fr-disclosure-btn { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 9px 10px; background: var(--surface-2); border: none; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--brand); font-family: var(--font-sans); }
+.fr-disclosure-body { padding: 10px 12px; font-size: 13px; color: var(--text-soft); background: #fff; border-top: 1px solid var(--line); }
+/* Formulas wrap instead of scrolling sideways: dragging the box hides the very
+   part the user opened it to audit. A wrapped line continues indented, via
+   .fr-formula-linha, so it does not read as a new line of the formula. */
+.fr-formula-box { font-family: var(--font-mono); font-size: 12px; line-height: 1.55; background: var(--ink); color: var(--invert); padding: 10px 12px; border-radius: var(--r-sm); margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fr-formula-linha { padding-left: 16px; text-indent: -16px; }
+.fr-formula-linha:empty { height: 0.6em; }
 
 /* ---------- inputs ---------- */
-.fr-field { display: flex; flex-direction: column; gap: 5px; }
-.fr-field-label { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; font-weight: 600; color: var(--text); }
-.fr-field input[type=number], .fr-field input[type=text], .fr-field input[type=date], .fr-field select {
+.fr-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.fr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
+.fr-field input[type=number], .fr-field input[type=text], .fr-field input[type=date], .fr-field select, .fr-input {
   font-family: var(--font-mono); font-size: 13px; padding: 7px 9px; border: 1px solid var(--line);
-  border-radius: var(--r-sm); background: #fff; color: var(--text); width: 100%;
+  border-radius: var(--r-sm); background: #fff; color: var(--text); width: 100%; min-width: 0;
 }
+.fr-field input:hover, .fr-field select:hover, .fr-input:hover { border-color: #C2C2C6; }
+.fr-input.text { font-family: var(--font-sans); }
 .fr-field input[type=range] { width: 100%; accent-color: var(--brand); }
 .fr-field-row { display: flex; align-items: center; gap: 10px; }
 .fr-field-row input[type=range] { flex: 1; }
-.fr-field-row .fr-num { min-width: 54px; text-align: right; }
+.fr-field-row .fr-num { min-width: 58px; text-align: right; }
+.fr-field-error { font-size: 12px; color: var(--danger-ink); font-weight: 600; }
 
-/* ---------- table ---------- */
-.fr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.fr-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); font-weight: 700; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.fr-table td { padding: 8px 10px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+/* ---------- tables ---------- */
+/* Headers wrap over two lines instead of stretching the column: a single-line
+   "Penetração exigida" pushes the table off screen. Numbers do not wrap —
+   1,234,567 split in half is unreadable. */
+.fr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: auto; }
+.fr-table th { text-align: left; font-size: 11.5px; line-height: 1.25; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 500; padding: 5px 7px; border-bottom: 1px solid var(--line); white-space: normal; }
+.fr-table td { padding: 5px 7px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+.fr-table th.num { vertical-align: bottom; }
 .fr-table tr:last-child td { border-bottom: none; }
-.fr-table td.num, .fr-table th.num { text-align: right; font-family: var(--font-mono); }
+.fr-table td.num, .fr-table th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.fr-table td.num { white-space: nowrap; }
+.fr-table tr.resto td { background: var(--surface-2); color: var(--text-soft); font-style: normal; }
+.fr-table tfoot td { font-weight: 600; border-top: 1px solid var(--text); }
 
 /* ---------- buttons ---------- */
-.fr-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text); }
-.fr-btn:hover { border-color: var(--brand); color: var(--brand); }
-.fr-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
-.fr-btn.primary:hover { background: var(--brand-deep); border-color: var(--brand-deep); color: #fff; }
-.fr-btn.ghost { border-color: transparent; background: transparent; }
-.fr-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.fr-btn.sm { padding: 5px 9px; font-size: 11.5px; }
+.fr-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--r-sm); font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text); font-family: var(--font-sans); transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
+.fr-btn:hover:not(:disabled) { background: var(--surface-2); border-color: #C2C2C6; color: var(--text); }
+.fr-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+.fr-btn.primary:hover:not(:disabled) { background: var(--brand-deep); border-color: var(--brand-deep); color: #fff; }
+.fr-btn.danger { color: var(--danger-ink); border-color: var(--danger-line); }
+.fr-btn.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); color: var(--danger-ink); }
+.fr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.fr-btn.sm { padding: 6px 10px; font-size: 12px; }
 .fr-seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.fr-seg button { padding: 6px 12px; font-size: 11.5px; font-weight: 600; border: none; background: #fff; color: var(--text-soft); cursor: pointer; border-right: 1px solid var(--line); }
+.fr-seg button { padding: 7px 13px; font-size: 12px; font-weight: 500; border: none; background: #fff; color: var(--text-soft); cursor: pointer; border-right: 1px solid var(--line); font-family: var(--font-sans); }
 .fr-seg button:last-child { border-right: none; }
-.fr-seg button.active { background: var(--brand); color: #fff; }
+.fr-seg button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+.fr-seg button.active { background: var(--brand); color: #fff; font-weight: 600; }
 
 /* ---------- alerts ---------- */
-.fr-alert { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-sm); font-size: 12px; border: 1px solid; }
-.fr-alert.critico { background: var(--danger-soft); border-color: #f0c4c0; color: var(--danger); }
-.fr-alert.atencao { background: var(--premissa-soft); border-color: #ecd9ab; color: #8a611a; }
-.fr-alert.info { background: var(--estimativa-soft); border-color: #c7d7ec; color: var(--brand-deep); }
+.fr-alert { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-sm); font-size: 13px; border: 1px solid; }
+.fr-alert.critico { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-ink); }
+.fr-alert.atencao { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
+.fr-alert.info { background: var(--surface-2); border-color: var(--line); color: var(--text-soft); }
 .fr-alert svg { flex: 0 0 auto; margin-top: 1px; }
 
-/* ---------- funnel diagram (elemento assinatura) ---------- */
+/* ---------- funnel ---------- */
 .fr-funnel { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; }
-.fr-funnel-stage { position: relative; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: filter 0.15s ease, transform 0.15s ease; border: none; padding: 0; }
-.fr-funnel-stage:hover { filter: brightness(1.06); }
-.fr-funnel-stage-inner { width: 100%; height: 100%; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; color: #fff; }
-.fr-funnel-label { font-size: 11px; font-weight: 600; text-align: left; }
-.fr-funnel-value { font-family: var(--font-mono); font-weight: 700; font-size: 13.5px; }
+.fr-funnel-stage { position: relative; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: filter 0.15s ease; border: none; padding: 0; min-height: 42px; }
+.fr-funnel-stage:hover:not(.estatico) { filter: brightness(1.12); }
+.fr-funnel-stage.estatico { cursor: default; }
+.fr-funnel-stage-inner { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; color: #fff; }
+.fr-funnel-label { font-size: 12px; font-weight: 500; text-align: left; }
+.fr-funnel-value { font-family: var(--font-mono); font-weight: 600; font-size: 14px; white-space: nowrap; }
+.fr-funnel-unit { font-size: 11px; opacity: 0.8; font-weight: 400; }
 .fr-funnel-connector { width: 1px; height: 6px; background: var(--line); }
+.fr-struct-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.fr-struct-card { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 12px; background: var(--surface-2); text-align: left; cursor: pointer; font-family: var(--font-sans); }
+.fr-struct-card:hover { border-color: #C2C2C6; }
+.fr-struct-card.active { border-color: var(--brand); background: var(--brand-soft); }
+.fr-struct-card .lbl { font-size: 12px; color: var(--text-faint); font-weight: 400; }
+.fr-struct-card .val { font-family: var(--font-mono); font-weight: 600; font-size: 18px; margin-top: 2px; }
 
-/* ---------- network tree ---------- */
-.fr-tree-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.fr-tree-node { flex: 1; text-align: center; padding: 10px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper); }
-.fr-tree-node .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint); font-weight: 700; }
-.fr-tree-node .val { font-family: var(--font-mono); font-weight: 700; font-size: 14px; margin-top: 3px; }
+/* ---------- network ---------- */
+.fr-tree-node { flex: 1; text-align: center; padding: 10px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); }
+.fr-tree-node .lbl { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
+.fr-tree-node .val { font-family: var(--font-mono); font-weight: 600; font-size: 15px; margin-top: 3px; }
 .fr-tree-arrow { color: var(--text-faint); flex: 0 0 auto; }
 
 /* ---------- misc ---------- */
-.fr-empty { text-align: center; padding: 50px 20px; color: var(--text-soft); }
 .fr-scroll-x { overflow-x: auto; }
 .fr-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.fr-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 16px; border: 1px solid var(--line); font-size: 11.5px; cursor: pointer; background: #fff; }
+.fr-chip { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: var(--r-sm); border: 1px solid var(--line); font-size: 12px; cursor: pointer; background: #fff; color: var(--text); font-family: var(--font-sans); }
+.fr-chip:hover { border-color: #C2C2C6; }
 .fr-chip.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand-deep); font-weight: 600; }
-.fr-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: var(--r-sm); border: 1px solid var(--line); background: #fff; cursor: pointer; color: var(--text-soft); }
-.fr-icon-btn:hover { border-color: var(--brand); color: var(--brand); }
-.fr-progress-track { height: 6px; background: var(--line-2); border-radius: 4px; overflow: hidden; }
-.fr-progress-fill { height: 100%; background: var(--brand); }
+.fr-chip.static { cursor: default; }
+.fr-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--r-sm); border: 1px solid var(--line); background: #fff; cursor: pointer; color: var(--text-soft); }
+.fr-icon-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.fr-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.fr-progress-track { height: 8px; background: var(--line-2); border-radius: 0; overflow: hidden; }
+.fr-progress-track { position: relative; }
+.fr-progress-fill { height: 100%; background: var(--brand); transition: width 0.2s ease; }
+/* Hatched stretch: where coverage lands depending on the real conversion. */
+.fr-progress-faixa {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px);
+}
 .fr-mobile-topbar { display: none; }
+.fr-sidebar-scrim { display: none; }
+.fr-boundary { max-width: 620px; margin: 60px auto; padding: 26px; border: 1px solid var(--line); border-radius: var(--r-md); background: #fff; font-family: var(--font-sans); color: var(--text); }
 
 @media (max-width: 980px) {
   .fr-app { flex-direction: column; }
   .fr-sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform 0.2s ease; width: 78vw; max-width: 300px; }
   .fr-sidebar.open { transform: translateX(0); }
-  .fr-mobile-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--ink); position: sticky; top: 0; z-index: 25; }
-  .fr-mobile-topbar .fr-brand-name { color: #fff; font-size: 12px; }
+  .fr-mobile-topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; background: var(--ink); position: sticky; top: 0; z-index: 25; }
+  .fr-mobile-topbar .fr-brand-name { color: #fff; font-size: 13px; }
   .fr-content { padding: 16px 14px 50px; }
-  .fr-grid-2, .fr-grid-3, .fr-grid-4, .fr-grid-5 { grid-template-columns: 1fr 1fr; }
+  .fr-grid-3, .fr-grid-4, .fr-grid-5 { grid-template-columns: 1fr 1fr; }
+  .fr-grid-2, .fr-grid-split, .fr-grid-half { grid-template-columns: 1fr; }
   .fr-topbar { padding: 8px 12px; }
-  .fr-sidebar-scrim { position: fixed; inset: 0; background: rgba(10,14,28,0.5); z-index: 19; }
+  .fr-sidebar-scrim { display: block; position: fixed; inset: 0; background: rgba(15,16,19,0.55); z-index: 19; }
 }
 @media (max-width: 620px) {
   .fr-grid-2, .fr-grid-3, .fr-grid-4, .fr-grid-5 { grid-template-columns: 1fr; }
+  .fr-h1 { font-size: 21px; }
+  .fr-kpi-value { font-size: 26px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .fr-app * { transition: none !important; animation: none !important; }
+  .fr-app *, .fr-app *::before, .fr-app *::after { transition: none !important; animation: none !important; }
+}
+@media print {
+  .fr-sidebar, .fr-topbar, .fr-mobile-topbar { display: none !important; }
+  .fr-card { break-inside: avoid; }
 }
 `;
 
 /* ============================================================================
-   COMPONENTES DE APOIO (atoms)
+   DISPLAY MODE — Advisor / Researcher, via context.
+   It filters navigation and advanced blocks across every view.
    ========================================================================== */
 
-const PROV_LABEL = { oficial: "Dado oficial", historico: "Dado histórico", premissa: "Premissa", estimativa: "Estimativa" };
+const ModeContext = createContext("pesquisador");
+const useIsResearcher = () => useContext(ModeContext) === "pesquisador";
 
-function ProvBadge({ type }) {
+/* ============================================================================
+   SUPPORTING COMPONENTS
+   ========================================================================== */
+
+const PROV_LABEL = {
+  oficial: "Dado oficial",
+  historico: "Referência histórica",
+  premissa: "Premissa",
+  estimativa: "Estimativa",
+};
+const PROV_HELP = {
+  oficial: "Vem da legislação ou de um arquivo oficial do TSE, com fonte e data declaradas.",
+  historico: "Apuração de um pleito passado, extraída dos arquivos oficiais. É referência, não previsão.",
+  premissa: "Valor informado pela equipe de campanha. Não existe fonte externa para ele.",
+  estimativa: "Resultado calculado a partir das premissas e dos dados acima.",
+};
+
+const fmtDataBR = (iso) => {
+  if (!iso) return null;
+  const [a, m, d] = String(iso).split("-");
+  return d ? `${d}/${m}/${a}` : `${m}/${a}`;
+};
+
+/** Provenance badge. With `fonte` set to a key in FONTES, it also carries the
+ *  agency, the reference date and the link. */
+function ProvBadge({ type, fonte, campo }) {
+  const id = fonte || (campo ? FONTE_DO_CAMPO[campo] : null);
+  const f = id ? FONTES[id] : null;
   if (!type || !PROV_LABEL[type]) return null;
+  const titulo = f
+    ? `${PROV_LABEL[type]} — ${f.orgao}. ${f.dataset}. Referência: ${fmtDataBR(f.dataReferencia)}. ${f.metodo}`
+    : PROV_HELP[type];
   return (
-    <span className={cx("fr-badge", type)}>
+    <span className={cx("fr-badge", type)} title={titulo}>
       <span className="dot" />{PROV_LABEL[type]}
     </span>
   );
 }
 
-function Formula({ title = "Como este número foi calculado?", formula, variables = [], children }) {
+/** Source card: agency, dataset, reference date, method and link. */
+function Fonte({ id, compacto = false }) {
+  const f = FONTES[id];
+  if (!f) return null;
+  if (compacto) {
+    return (
+      <span className="fr-hint">
+        Fonte: {f.orgao} — {f.dataset}, ref. {fmtDataBR(f.dataReferencia)}.{" "}
+        <a href={f.url} target="_blank" rel="noreferrer noopener">ver origem</a>
+      </span>
+    );
+  }
+  return (
+    <div className="fr-fonte">
+      <div className="fr-fonte-linha"><span>Órgão</span><b>{f.orgao}</b></div>
+      <div className="fr-fonte-linha"><span>Conjunto</span><b>{f.dataset}</b></div>
+      {f.arquivo && <div className="fr-fonte-linha"><span>Arquivo</span><b className="fr-mono">{f.arquivo}</b></div>}
+      <div className="fr-fonte-linha"><span>Data de referência</span><b>{fmtDataBR(f.dataReferencia)}</b></div>
+      <div className="fr-fonte-linha"><span>Extraído em</span><b>{fmtDataBR(f.dataColeta)}</b></div>
+      <div className="fr-fonte-metodo"><b>Como foi apurado:</b> {f.metodo}</div>
+      <a className="fr-btn sm" href={f.url} target="_blank" rel="noreferrer noopener" style={{ marginTop: 8 }}>
+        <ExternalLink size={12} /> Abrir a fonte
+      </a>
+    </div>
+  );
+}
+
+/** One element per line, so that a wrap on a narrow screen reads as a
+ *  continuation and not as another line of the formula. */
+function FormulaBox({ children, style }) {
+  if (children == null || children === "") return null;
+  return (
+    <div className="fr-formula-box" style={style}>
+      {String(children).split("\n").map((linha, i) => (
+        <div className="fr-formula-linha" key={i}>{linha}</div>
+      ))}
+    </div>
+  );
+}
+
+/** Formula detail, available in both modes: whoever most needs to trust the
+ *  number must be able to audit it. Researcher mode gates the advanced blocks,
+ *  not the arithmetic. */
+function Formula({ title = "Como este número foi calculado?", formula, variables = [], fonte, children }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="fr-disclosure">
-      <button className="fr-disclosure-btn" onClick={() => setOpen((o) => !o)} type="button">
+      <button className="fr-disclosure-btn" onClick={() => setOpen((o) => !o)} type="button" aria-expanded={open}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         {title}
       </button>
       {open && (
         <div className="fr-disclosure-body">
-          {formula && <div className="fr-formula-box">{formula}</div>}
+          {formula && <FormulaBox>{formula}</FormulaBox>}
           {variables.length > 0 && (
             <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
               {variables.map((v, i) => (
                 <li key={i} style={{ marginBottom: 3 }}>
                   <span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}
-                  {v.prov && <span style={{ marginLeft: 6 }}><ProvBadge type={v.prov} /></span>}
+                  {v.prov && <span style={{ marginLeft: 6 }}><ProvBadge type={v.prov} fonte={v.fonte} /></span>}
                 </li>
               ))}
             </ul>
           )}
+          {fonte && <div style={{ marginTop: 8 }}><Fonte id={fonte} compacto /></div>}
           {children}
         </div>
       )}
@@ -857,32 +486,173 @@ function Formula({ title = "Como este número foi calculado?", formula, variable
   );
 }
 
-function Kpi({ label, value, sub, prov }) {
+/** Card title with the arithmetic behind an "i", the same gesture the KPIs
+ *  use. In the subtitle it costs three lines of screen to every reader. */
+function TituloComInfo({ title, rotulo = "Como este número é calculado?", children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="fr-row" style={{ gap: 6 }}>
+        <h2 className="fr-h2">{title}</h2>
+        <button type="button" className="fr-info-btn" aria-expanded={open}
+          aria-label={rotulo} title={rotulo} onClick={() => setOpen((o) => !o)}>
+          <Info size={13} />
+        </button>
+      </div>
+      {open && <div className="fr-kpi-detalhe">{children}</div>}
+    </>
+  );
+}
+
+/** Visible in Researcher mode only. */
+function ResearcherOnly({ children }) {
+  return useIsResearcher() ? <>{children}</> : null;
+}
+
+/** Indicator. Given `formula` or `fonte`, it grows an info button that opens
+ *  the arithmetic and the origin in place. */
+function Kpi({ label, value, sub, prov, tone, formula, variables = [], fonte, nota }) {
+  const [open, setOpen] = useState(false);
+  const color = tone === "danger" ? "var(--danger-ink)" : tone === "ok" ? "var(--oficial-ink)" : undefined;
+  const temDetalhe = Boolean(formula || fonte || nota || variables.length);
   return (
     <div className="fr-kpi">
-      <div className="fr-row" style={{ justifyContent: "space-between" }}>
+      <div className="fr-row fr-between">
         <span className="fr-kpi-label">{label}</span>
-        {prov && <ProvBadge type={prov} />}
+        <span className="fr-row" style={{ gap: 4 }}>
+          {prov && <ProvBadge type={prov} fonte={fonte} />}
+          {temDetalhe && (
+            <button type="button" className="fr-info-btn" aria-expanded={open}
+              aria-label={`De onde vem "${label}"`} title={`De onde vem "${label}"`}
+              onClick={() => setOpen((o) => !o)}>
+              <Info size={13} />
+            </button>
+          )}
+        </span>
       </div>
-      <div className="fr-kpi-value">{value}</div>
+      <div className="fr-kpi-value" style={color ? { color } : undefined}>{value}</div>
       {sub && <div className="fr-kpi-sub">{sub}</div>}
+      {open && temDetalhe && (
+        <div className="fr-kpi-detalhe">
+          {formula && <FormulaBox>{formula}</FormulaBox>}
+          {variables.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              {variables.map((v, i) => (
+                <li key={i} style={{ marginBottom: 2 }}>
+                  <span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}
+                </li>
+              ))}
+            </ul>
+          )}
+          {nota && <p style={{ marginTop: 6 }}>{nota}</p>}
+          {fonte && <div style={{ marginTop: 6 }}><Fonte id={fonte} compacto /></div>}
+        </div>
+      )}
     </div>
   );
 }
 
-function NumberField({ label, value, onChange, min, max, step = 1, suffix, prov, hint, mono = true }) {
+/**
+ * Indicator shown as a RANGE. A result derived from a guessed 15% door-to-door
+ * conversion does not carry seven significant figures. The central value stays
+ * in the detail panel, for whoever needs a single number to plan with.
+ *
+ * `faixa` is the percentile summary from the Monte Carlo ({ p10, p50, p90 }).
+ */
+function KpiFaixa({ label, faixa, formatar = fmtSig, prov = PROV.ESTIMATIVA, tone, sub, formula, variables = [], nota, exato }) {
+  const [open, setOpen] = useState(false);
+  const color = tone === "danger" ? "var(--danger-ink)" : tone === "ok" ? "var(--oficial-ink)" : undefined;
+  const indefinido = !faixa || !isFiniteNum(faixa.p10) || !isFiniteNum(faixa.p90);
+  return (
+    <div className="fr-kpi">
+      <div className="fr-row fr-between">
+        <span className="fr-kpi-label">{label}</span>
+        <span className="fr-row" style={{ gap: 4 }}>
+          <ProvBadge type={prov} />
+          <button type="button" className="fr-info-btn" aria-expanded={open}
+            aria-label={`De onde vem "${label}"`} title={`De onde vem "${label}"`}
+            onClick={() => setOpen((o) => !o)}>
+            <Info size={13} />
+          </button>
+        </span>
+      </div>
+      {indefinido ? (
+        <div className="fr-kpi-value">—</div>
+      ) : (
+        <>
+          <div className="fr-kpi-faixa" style={color ? { color } : undefined}>
+            {formatar(faixa.p10)}<span className="ate">–</span>{formatar(faixa.p90)}
+          </div>
+          <div className="fr-kpi-sub">
+            central {formatar(faixa.p50)}
+            {sub ? ` · ${sub}` : ""}
+          </div>
+        </>
+      )}
+      {open && (
+        <div className="fr-kpi-detalhe">
+          <p>
+            A faixa cobre <b>80% das 3.000 simulações</b> (percentis 10 a 90), variando abstenção,
+            fidelidade e conversão dentro dos limites definidos em <b>Simulações</b>. Não é margem de
+            erro estatística: é o espalhamento que as suas próprias premissas produzem.
+          </p>
+          {!indefinido && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              <li>Otimista (P10): <span className="fr-mono">{formatar(faixa.p10)}</span></li>
+              <li>Central (P50): <span className="fr-mono">{formatar(faixa.p50)}</span></li>
+              <li>Pessimista (P90): <span className="fr-mono">{formatar(faixa.p90)}</span></li>
+              {isFiniteNum(exato) && (
+                <li>Cálculo determinístico, sem variação: <span className="fr-mono">{fmtInt(exato)}</span></li>
+              )}
+            </ul>
+          )}
+          {formula && <FormulaBox style={{ marginTop: 8 }}>{formula}</FormulaBox>}
+          {variables.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              {variables.map((v, i) => (
+                <li key={i}><span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}</li>
+              ))}
+            </ul>
+          )}
+          {nota && <p style={{ marginTop: 6 }}>{nota}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** HTML min/max do not stop typing, so the value is sanitized on blur. An
+ *  empty intermediate state is allowed and does not collapse to 0 mid-typing. */
+function NumberField({ label, value, onChange, min, max, step = 1, suffix, prov, hint, id }) {
+  const [draft, setDraft] = useState(null);
+  const fieldId = useRef(id || uid("num")).current;
+  const shown = draft !== null ? draft : (isFiniteNum(value) ? String(value) : "");
+
+  const commit = (raw) => {
+    setDraft(null);
+    if (raw === "" || raw === "-") { onChange(isFiniteNum(min) ? min : 0); return; }
+    let v = parseFloat(raw);
+    if (!Number.isFinite(v)) { onChange(isFiniteNum(min) ? min : 0); return; }
+    if (isFiniteNum(min)) v = Math.max(min, v);
+    if (isFiniteNum(max)) v = Math.min(max, v);
+    onChange(v);
+  };
+
   return (
     <div className="fr-field">
-      <div className="fr-field-label">
+      <label className="fr-field-label" htmlFor={fieldId}>
         <span>{label}</span>
         {prov && <ProvBadge type={prov} />}
-      </div>
+      </label>
       <div className="fr-row">
         <input
-          type="number" value={Number.isFinite(value) ? value : ""} min={min} max={max} step={step}
-          onChange={(e) => onChange(e.target.value === "" ? 0 : parseFloat(e.target.value))}
+          id={fieldId} type="number" inputMode="decimal" value={shown}
+          min={min} max={max} step={step}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={(e) => commit(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") commit(e.currentTarget.value); }}
         />
-        {suffix && <span className="fr-hint">{suffix}</span>}
+        {suffix && <span className="fr-hint" style={{ whiteSpace: "nowrap" }}>{suffix}</span>}
       </div>
       {hint && <span className="fr-hint">{hint}</span>}
     </div>
@@ -890,26 +660,30 @@ function NumberField({ label, value, onChange, min, max, step = 1, suffix, prov,
 }
 
 function SliderField({ label, value, onChange, min = 0, max = 1, step = 0.01, pct = true, prov, hint }) {
+  const fieldId = useRef(uid("rng")).current;
   return (
     <div className="fr-field">
-      <div className="fr-field-label">
+      <label className="fr-field-label" htmlFor={fieldId}>
         <span>{label}</span>
         {prov && <ProvBadge type={prov} />}
-      </div>
+      </label>
       <div className="fr-field-row">
-        <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} />
-        <span className="fr-num">{pct ? fmtPct(value) : fmtDec(value, 2)}</span>
+        <input id={fieldId} type="range" min={min} max={max} step={step}
+          value={isFiniteNum(value) ? value : min}
+          onChange={(e) => onChange(parseFloat(e.target.value))} />
+        <span className="fr-num" aria-hidden="true">{pct ? fmtPct(value) : fmtDec(value, 2)}</span>
       </div>
       {hint && <span className="fr-hint">{hint}</span>}
     </div>
   );
 }
 
-function SegmentedControl({ options, value, onChange }) {
+function SegmentedControl({ options, value, onChange, ariaLabel }) {
   return (
-    <div className="fr-seg">
+    <div className="fr-seg" role="group" aria-label={ariaLabel}>
       {options.map((o) => (
-        <button key={o.value} className={cx(value === o.value && "active")} onClick={() => onChange(o.value)} type="button">
+        <button key={o.value} type="button" aria-pressed={value === o.value}
+          className={cx(value === o.value && "active")} onClick={() => onChange(o.value)}>
           {o.label}
         </button>
       ))}
@@ -917,19 +691,31 @@ function SegmentedControl({ options, value, onChange }) {
   );
 }
 
-function AlertList({ alerts }) {
-  if (!alerts?.length) return null;
-  const icon = { critico: <AlertTriangle size={15} />, atencao: <AlertTriangle size={15} />, info: <Info size={15} /> };
+function AlertList({ alerts, empty = "Nenhum alerta ativo para o plano atual." }) {
+  if (!alerts?.length) return <p className="fr-hint">{empty}</p>;
   return (
-    <div className="fr-stack" style={{ gap: 8 }}>
+    <div className="fr-stack" style={{ gap: 8 }} role="status">
       {alerts.map((a, i) => (
         <div key={i} className={cx("fr-alert", a.level)}>
-          {icon[a.level]}
+          {a.level === "info" ? <Info size={15} /> : <AlertTriangle size={15} />}
           <span>{a.text}</span>
         </div>
       ))}
     </div>
   );
+}
+
+/** Switching state invalidates everything keyed to the old one: prioritised
+ *  municipalities, the majoritarian office's municipality, and the per-territory
+ *  parameters. Without the reset, stale ids fall through to the fallback. */
+function mudarUf(cfg, uf) {
+  const municipios = getMunicipiosDaUf(uf);
+  return {
+    uf,
+    territoriosSelecionados: municipios.map((m) => m.id),
+    municipioId: municipios[0]?.id || null,
+    territorioParams: {},
+  };
 }
 
 function SectionHead({ eyebrow, title, desc }) {
@@ -942,48 +728,84 @@ function SectionHead({ eyebrow, title, desc }) {
   );
 }
 
-/* ---------------------------- funil (elemento assinatura) ---------------------------- */
+const PROV_COLOR = { oficial: "#1A6B4C", historico: "#5B4E92", premissa: "#565A66", estimativa: "#2F5D96" };
 
-const PROV_COLOR = { oficial: "#187A56", historico: "#6A5AA8", premissa: "#B9821F", estimativa: "#3D6BA8" };
-
+/** Only VOLUME stages (people, contacts, actions) share the visual scale;
+ *  STRUCTURE stages (configuration counts) go to a separate grid. */
 function FunnelDiagram({ stages, onSelect, activeKey }) {
-  // stages: [{key,label,value,prov,displayValue}]
-  const values = stages.map((s) => (isFiniteNum(s.value) && s.value > 0 ? s.value : 1));
-  const maxV = Math.max(...values);
+  const volume = stages.filter((s) => s.kind !== "estrutura");
+  const estrutura = stages.filter((s) => s.kind === "estrutura");
+  const finite = volume.map((s) => (isFiniteNum(s.value) && s.value > 0 ? s.value : 0));
+  const maxV = Math.max(...finite, 1);
   const minWidthPct = 34;
+
   return (
-    <div className="fr-funnel">
-      {stages.map((s, i) => {
-        const ratio = Math.sqrt((isFiniteNum(s.value) ? Math.max(s.value, 1) : 1) / maxV);
-        const widthPct = minWidthPct + ratio * (100 - minWidthPct);
-        return (
-          <React.Fragment key={s.key}>
-            <button
-              type="button"
-              className="fr-funnel-stage"
-              style={{
-                width: `${widthPct}%`, height: 40,
-                background: activeKey === s.key ? PROV_COLOR[s.prov] : `${PROV_COLOR[s.prov]}${activeKey && activeKey !== s.key ? "cc" : "e6"}`,
-                borderRadius: 3, boxShadow: activeKey === s.key ? "0 0 0 2px #10162B33" : "none",
-              }}
-              onClick={() => onSelect && onSelect(s.key)}
-            >
-              <span className="fr-funnel-stage-inner">
-                <span className="fr-funnel-label">{i + 1}. {s.label}</span>
-                <span className="fr-funnel-value">{s.displayValue ?? fmtInt(s.value)}</span>
-              </span>
-            </button>
-            {i < stages.length - 1 && <div className="fr-funnel-connector" />}
-          </React.Fragment>
-        );
-      })}
+    <div className="fr-stack" style={{ gap: 12 }}>
+      <div className="fr-funnel">
+        {volume.map((s, i) => {
+          const v = isFiniteNum(s.value) && s.value > 0 ? s.value : 0;
+          const ratio = Math.sqrt(Math.max(v, maxV * 0.02) / maxV);
+          const widthPct = minWidthPct + ratio * (100 - minWidthPct);
+          const active = activeKey === s.key;
+          // With no onSelect the stage is a chart, not a control: rendering it
+          // as a button announces six inert toggles to a screen reader.
+          const interativo = typeof onSelect === "function";
+          const Tag = interativo ? "button" : "div";
+          const estilo = {
+            width: `${widthPct}%`,
+            background: PROV_COLOR[s.prov] || "#2F5D96",
+            opacity: activeKey && !active ? 0.72 : 1,
+            borderRadius: 3,
+            boxShadow: active ? "0 0 0 2px var(--ink)" : "none",
+          };
+          return (
+            <React.Fragment key={s.key}>
+              <Tag
+                {...(interativo
+                  ? { type: "button", "aria-pressed": active, onClick: () => onSelect(s.key) }
+                  : {})}
+                className={cx("fr-funnel-stage", !interativo && "estatico")}
+                style={estilo}
+              >
+                <span className="fr-funnel-stage-inner">
+                  <span className="fr-funnel-label">{i + 1}. {s.label}</span>
+                  <span className="fr-funnel-value">
+                    {s.displayValue ?? fmtInt(s.value)}
+                    {s.unit && <span className="fr-funnel-unit"> {s.unit}</span>}
+                  </span>
+                </span>
+              </Tag>
+              {i < volume.length - 1 && <div className="fr-funnel-connector" />}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {estrutura.length > 0 && (
+        <div>
+          <div className="fr-hint" style={{ marginBottom: 6 }}>
+            Parâmetros de estrutura — contagens de configuração, não volumes comparáveis às etapas acima:
+          </div>
+          <div className="fr-struct-grid">
+            {estrutura.map((s) => (
+              <button key={s.key} type="button" aria-pressed={activeKey === s.key}
+                className={cx("fr-struct-card", activeKey === s.key && "active")}
+                disabled={typeof onSelect !== "function"}
+                onClick={() => onSelect && onSelect(s.key)}>
+                <div className="lbl">{s.label}</div>
+                <div className="val">{s.displayValue ?? fmtInt(s.value)} <span className="fr-funnel-unit" style={{ color: "var(--text-faint)" }}>{s.unit}</span></div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function NetworkTree({ trail }) {
   return (
-    <div className="fr-row" style={{ overflowX: "auto", paddingBottom: 6 }}>
+    <div className="fr-row fr-scroll-x" style={{ paddingBottom: 6 }}>
       {trail.map((n, i) => (
         <React.Fragment key={n.layer}>
           <div className="fr-tree-node" style={{ minWidth: 120 }}>
@@ -998,63 +820,225 @@ function NetworkTree({ trail }) {
 }
 
 /* ============================================================================
-   VIEW: VISÃO GERAL — dashboard executivo (10 KPIs, seção 21) + alertas.
+   ERROR BOUNDARY — a bad saved config must not leave the user on a white
+   screen with no way to clear it.
    ========================================================================== */
 
-function ViewVisaoGeral({ cfg, derived, setActiveView }) {
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="fr-app" style={{ display: "block", padding: 20 }}>
+        <style>{STYLE}</style>
+        <div className="fr-boundary">
+          <h1 className="fr-h1">Algo quebrou ao montar a tela</h1>
+          <p className="fr-desc" style={{ marginBottom: 14 }}>
+            O plano guardado neste navegador pode estar incompatível com esta versão do app.
+            Você pode recarregar ou restaurar a configuração padrão — modelos salvos e o
+            registro operacional são preservados no segundo caso.
+          </p>
+          <pre className="fr-formula-box" style={{ whiteSpace: "pre-wrap" }}>{String(this.state.error?.message || this.state.error)}</pre>
+          <div className="fr-row fr-row-wrap" style={{ marginTop: 14 }}>
+            <button className="fr-btn primary" onClick={() => window.location.reload()}>
+              <RefreshCw size={14} /> Recarregar
+            </button>
+            <button className="fr-btn" onClick={() => {
+              try { window.localStorage.removeItem(STORAGE_KEYS.lastConfig); } catch { /* ignora */ }
+              window.location.reload();
+            }}>
+              <RotateCcw size={14} /> Restaurar configuração padrão
+            </button>
+            <button className="fr-btn danger" onClick={() => {
+              try { Object.values(STORAGE_KEYS).forEach((k) => window.localStorage.removeItem(k)); } catch { /* ignora */ }
+              window.location.reload();
+            }}>
+              <Trash2 size={14} /> Apagar tudo deste navegador
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+/* ============================================================================
+   VIEW: OVERVIEW
+   ========================================================================== */
+
+function ViewVisaoGeral({ cfg, derived, setActiveView, incerteza }) {
   const d = derived;
-  const progressoCobertura = clamp01(safeDiv(d.dailyCapacity, d.dailyContacts));
+  // Capacity coverage at both ends of the simulation: the lower demand (P10)
+  // is where the structure covers most, the higher (P90) where it covers least.
+  const coberturaOtimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p10));
+  const coberturaPessimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p90));
+  const temRegistro = d.planejado > 0 || d.realizado > 0;
+
   return (
     <div className="fr-stack">
       <SectionHead eyebrow="Painel executivo" title="Visão Geral"
         desc="Os dez indicadores que resumem a distância entre a meta e a operação — atualizados a cada alteração de premissa ou cenário." />
-      <div className="fr-grid fr-grid-5">
-        <Kpi label="Meta de votos" value={fmtInt(cfg.voteGoal)} prov="premissa" />
-        <Kpi label="Meta ajustada" value={fmtInt(d.adjustedGoal)} sub={`comparecimento ${fmtPct(d.turnoutRate)} · fidelidade ${fmtPct(d.scenario.fidelityRate)}`} prov="estimativa" />
-        <Kpi label="Contatos necessários" value={fmtInt(d.totalContactsNeeded)} prov="estimativa" />
-        <Kpi label="Contatos realizados" value="0" sub="Registre em Relatórios → rastreamento" prov="estimativa" />
-        <Kpi label="Déficit de contatos" value={fmtInt(d.totalContactsNeeded)} sub="realizados − necessários" prov="estimativa" />
-        <Kpi label="Dias restantes" value={fmtInt(cfg.campaignDays)} prov="premissa" />
-        <Kpi label="Meta diária" value={fmtInt(d.dailyContacts)} prov="estimativa" />
-        <Kpi label="Capacidade diária" value={fmtInt(d.dailyCapacity)} sub={d.capacityStatus === "insuficiente" ? "abaixo da meta diária" : "dentro ou acima da meta diária"} prov="estimativa" />
-        <Kpi label="Cobertura territorial" value={`${d.territories.length} território(s)`} sub={`peso somado ${fmtPct(d.weightSum)}`} prov="estimativa" />
-        <Kpi label="Custo estimado" value={fmtMoney(d.totalCost)} sub={`${fmtMoney(d.costPerSupport)} por apoio`} prov="estimativa" />
+
+      <div className="fr-alert info" style={{ marginBottom: 14 }}>
+        <Info size={15} />
+        <span>
+          Os indicadores que dependem de conversão aparecem como <b>faixa</b>, não como número
+          exato. Um resultado que sai de uma taxa de conversão estimada não tem precisão à unidade —
+          a faixa cobre 80% de 3.000 simulações das suas próprias premissas. O valor central e o
+          cálculo determinístico estão no botão de informação de cada indicador.{" "}
+          <button type="button" className="fr-link-btn" onClick={() => setActiveView("simulacoes")}>
+            Ajustar os limites da incerteza
+          </button>
+        </span>
       </div>
 
-      <div className="fr-grid fr-grid-2">
+      <div className="fr-grid fr-grid-5">
+        <Kpi label="Meta de votos" value={fmtInt(cfg.voteGoal)} prov={PROV.PREMISSA}
+          nota="Número que a campanha escolheu perseguir. Não é dado nem previsão: é a decisão da qual todo o resto deriva. Altere em Meta Eleitoral." />
+        <KpiFaixa label="Meta ajustada" faixa={incerteza.adjustedGoal} exato={d.adjustedGoal}
+          sub={`abstenção ${fmtPct(cfg.abstentionRate)} · fidelidade ${fmtPct(d.scenario.fidelityRate)}`}
+          formula={"META_AJUSTADA = META_VOTOS ÷ (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)"}
+          variables={[
+            { name: "META_VOTOS", value: `${fmtInt(cfg.voteGoal)} (decisão sua, não varia)` },
+            { name: "ABSTENÇÃO", value: `${fmtPct(cfg.abstentionRate)} ± 7 p.p. na simulação` },
+            { name: "FIDELIDADE", value: `${fmtPct(d.scenario.fidelityRate)} (−12 / +8 p.p.)` },
+          ]}
+          nota="As duas taxas são premissas do cenário ativo, não medições. O comparecimento medido na circunscrição aparece em Territórios." />
+        <KpiFaixa label="Contatos necessários" faixa={incerteza.contacts} exato={d.totalContactsNeeded}
+          formula={"CONTATOS = Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) ÷ CONVERSÃO_CANAL ]"}
+          variables={d.enabledChannels.map((c) => ({ name: c.label, value: `${fmtPct(c.share)} da meta ÷ ${fmtPct(c.conversion)} ≈ ${fmtSig(c.contactsNeeded)}` }))}
+          nota="É aqui que a incerteza mais dói: a conversão entra na simulação variando de 70% a 130% do valor que você informou, porque quase nenhuma campanha conhece a própria taxa." />
+        {/* Estes dois liam "0" fixo; agora vêm do registro operacional. */}
+        <Kpi label="Contatos realizados" value={fmtInt(d.realizado)}
+          sub={temRegistro ? `${fmtPct(d.progressoFunil)} da meta de contatos` : "Registre em Relatórios → rastreamento"}
+          prov={PROV.PREMISSA}
+          nota="Soma do que a equipe registrou manualmente em Relatórios. Não há importação automática nesta versão." />
+        <KpiFaixa label="Déficit de contatos" exato={d.deficitContatos}
+          faixa={{
+            p10: Math.max(0, incerteza.contacts.p10 - d.realizado),
+            p50: Math.max(0, incerteza.contacts.p50 - d.realizado),
+            p90: Math.max(0, incerteza.contacts.p90 - d.realizado),
+          }}
+          sub="necessários − realizados"
+          tone={d.deficitContatos > 0 ? "danger" : "ok"}
+          formula={"DÉFICIT = CONTATOS_NECESSÁRIOS − CONTATOS_REALIZADOS"}
+          variables={[
+            { name: "CONTATOS_NECESSÁRIOS", value: fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90) },
+            { name: "CONTATOS_REALIZADOS", value: `${fmtInt(d.realizado)} (registrado, não varia)` },
+          ]} />
+        <Kpi label="Dias restantes" value={fmtInt(d.diasRestantes)}
+          sub={`de ${fmtInt(cfg.campaignDays)} dias de campanha`} prov={PROV.ESTIMATIVA}
+          formula={"DIAS_RESTANTES = DATA_FIM_DA_AGENDA − HOJE"}
+          variables={[
+            { name: "DATA_FIM", value: cfg.agenda.dataFim },
+            { name: "1º TURNO DE " + cfg.eleicaoAno, value: electionDates(cfg.eleicaoAno)?.primeiroTurno || "—" },
+          ]}
+          fonte="DATAS_LEI_9504"
+          nota="Conta para a data final da Agenda, não para o ano escolhido na barra de contexto. Se as duas divergirem, aparece um alerta aqui em cima." />
+        <KpiFaixa label="Meta diária" faixa={incerteza.daily} exato={d.dailyContacts}
+          formula={"META_DIÁRIA = CONTATOS_NECESSÁRIOS ÷ DIAS_DE_CAMPANHA"}
+          variables={[
+            { name: "CONTATOS_NECESSÁRIOS", value: fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90) },
+            { name: "DIAS_DE_CAMPANHA", value: `${fmtInt(cfg.campaignDays)} (não varia)` },
+          ]} />
+        <Kpi label="Capacidade diária" value={fmtInt(d.dailyCapacity)}
+          sub={d.capacityStatus === "insuficiente" ? "abaixo da meta diária" : "dentro ou acima da meta diária"}
+          tone={d.capacityStatus === "insuficiente" ? "danger" : "ok"} prov={PROV.ESTIMATIVA}
+          formula={"CAPACIDADE = MOBILIZADORES × HORAS_DIA × CONTATOS_HORA\n           + REUNIÕES_DIA × CONTATOS_POR_REUNIÃO\n           + EVENTOS_DIA × CONTATOS_POR_EVENTO"}
+          variables={[
+            { name: "MOBILIZADORES", value: fmtInt(cfg.team.mobilizadores) },
+            { name: "HORAS_DIA × CONTATOS_HORA", value: `${fmtDec(cfg.team.horasDia, 1)} × ${fmtInt(cfg.team.contatosHora)}` },
+          ]}
+          nota="Todos os parâmetros são premissas da equipe, editáveis em Equipes." />
+        <Kpi label="Cobertura territorial" value={fmtInt(d.territoriosPrioritarios.length)}
+          sub={`de ${fmtInt(d.territories.length)} territórios · ${fmtPct(d.territories.filter((t) => !t.resto).reduce((a, t) => a + t.eleitoradoShare, 0))} do eleitorado`}
+          prov={PROV.ESTIMATIVA} fonte="ELEITORADO_2026"
+          nota="Territórios priorizados na distribuição da meta. O eleitorado de cada um vem do cadastro do TSE; o recorte é seu, em Territórios." />
+        <KpiFaixa label="Custo estimado" faixa={incerteza.cost} exato={d.totalCost}
+          formatar={(v) => fmtSig(v, 3)}
+          sub={`orçamento ${fmtSig(cfg.budget.orcamentoTotal)}`}
+          tone={incerteza.cost.p90 > cfg.budget.orcamentoTotal ? "danger" : undefined}
+          formula={"CUSTO = CONTATOS × CUSTO_POR_CONTATO\n      + EVENTOS × CUSTO_POR_EVENTO\n      + DIAS_ATIVOS × CUSTO_LOGÍSTICO_DIA"}
+          variables={[
+            { name: "CUSTO_POR_CONTATO", value: fmtMoney(cfg.budget.custoPorContato) },
+            { name: "CUSTO_POR_EVENTO", value: fmtMoney(cfg.budget.custoPorEvento) },
+            { name: "CUSTO_LOGÍSTICO_DIA", value: fmtMoney(cfg.budget.custoLogisticoDia) },
+          ]}
+          nota="Valores unitários informados pela equipe, em Orçamento. Não incluem limites legais de gasto de campanha." />
+      </div>
+
+      <div className="fr-grid fr-grid-half">
         <div className="fr-card">
           <h2 className="fr-h2">Capacidade × demanda diária</h2>
           <p className="fr-desc">Comparação entre o que a estrutura atual consegue entregar por dia e o que o funil exige.</p>
           <div style={{ marginTop: 12 }}>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-              <span>Capacidade: <b className="fr-num">{fmtInt(d.dailyCapacity)}</b></span>
-              <span>Demanda: <b className="fr-num">{fmtInt(d.dailyContacts)}</b></span>
+            <div className="fr-line">
+              <span>Capacidade: <b className="fr-num">{fmtInt(d.dailyCapacity)}</b> / dia</span>
+              <span>Demanda: <b className="fr-num">{fmtFaixa(incerteza.daily.p10, incerteza.daily.p90)}</b> / dia</span>
             </div>
-            <div className="fr-progress-track">
-              <div className="fr-progress-fill" style={{ width: `${Math.min(100, progressoCobertura * 100)}%`, background: d.capacityStatus === "insuficiente" ? "var(--danger)" : "var(--oficial)" }} />
+            {/* Duas faixas: a cobertura no cenário otimista e no pessimista.
+                Uma barra só sugeria que a demanda era um ponto conhecido. */}
+            <div className="fr-progress-track" role="img"
+              aria-label={`A estrutura cobre entre ${fmtPct(coberturaPessimista)} e ${fmtPct(coberturaOtimista)} da demanda diária`}>
+              <div className="fr-progress-fill" style={{
+                width: `${Math.min(100, coberturaPessimista * 100)}%`,
+                background: d.capacityStatus === "insuficiente" ? "var(--danger)" : "var(--oficial)",
+              }} />
+              <div className="fr-progress-faixa" style={{
+                left: `${Math.min(100, coberturaPessimista * 100)}%`,
+                width: `${Math.max(0, Math.min(100, coberturaOtimista * 100) - Math.min(100, coberturaPessimista * 100))}%`,
+              }} />
+            </div>
+            <div className="fr-hint" style={{ marginTop: 6 }}>
+              A estrutura cobre entre <b>{fmtPct(coberturaPessimista)}</b> e <b>{fmtPct(coberturaOtimista)}</b> da
+              demanda diária, conforme a conversão real fique perto do pior ou do melhor caso simulado.
             </div>
           </div>
-          <button className="fr-btn sm" style={{ marginTop: 12 }} onClick={() => setActiveView("equipes")}>Ajustar equipe <ArrowRight size={13} /></button>
+          <button className="fr-btn sm" style={{ marginTop: 12 }} onClick={() => setActiveView("equipes")}>
+            Ajustar equipe <ArrowRight size={13} />
+          </button>
         </div>
+
         <div className="fr-card">
-          <h2 className="fr-h2">Alertas ativos</h2>
-          <p className="fr-desc">Verificações automáticas sobre a consistência do plano atual.</p>
+          <h2 className="fr-h2">Progresso do plano</h2>
+          <p className="fr-desc">Contatos registrados em Relatórios contra o total que o funil exige.</p>
           <div style={{ marginTop: 12 }}>
-            <AlertList alerts={d.alerts} />
+            <div className="fr-line">
+              <span>Realizado: <b className="fr-num">{fmtInt(d.realizado)}</b></span>
+              <span>Necessário: <b className="fr-num">{fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90)}</b></span>
+            </div>
+            <div className="fr-progress-track" role="img" aria-label={`${fmtPct(d.progressoFunil)} do funil percorrido`}>
+              <div className="fr-progress-fill" style={{ width: `${d.progressoFunil * 100}%` }} />
+            </div>
+            <div className="fr-hint" style={{ marginTop: 6 }}>
+              {temRegistro
+                ? <>Esperado até aqui: <b className="fr-num">{fmtInt(d.esperadoAteAgora)}</b>{d.ritmoVsEsperado !== null && <> · ritmo <b>{fmtPct(d.ritmoVsEsperado)}</b> do previsto</>}</>
+                : <>Nenhum dia registrado ainda.</>}
+            </div>
           </div>
+          <button className="fr-btn sm" style={{ marginTop: 12 }} onClick={() => setActiveView("relatorios")}>
+            Registrar execução <ArrowRight size={13} />
+          </button>
         </div>
       </div>
 
       <div className="fr-card">
+        <h2 className="fr-h2">Alertas ativos</h2>
+        <p className="fr-desc">Verificações automáticas de consistência e viabilidade do plano atual.</p>
+        <div style={{ marginTop: 12 }}><AlertList alerts={d.alerts} /></div>
+      </div>
+
+      <div className="fr-card">
         <h2 className="fr-h2">Funil — visão rápida</h2>
-        <p className="fr-desc">Abra "Funil Reverso" para navegar as 13 etapas em detalhe, com fórmulas e gargalos.</p>
+        <p className="fr-desc">Abra "Funil Reverso" para navegar todas as etapas em detalhe, com fórmulas e gargalos.</p>
         <div style={{ marginTop: 12 }}>
           <FunnelDiagram
             stages={[
-              { key: "meta", label: "Meta de votos", value: cfg.voteGoal, prov: "premissa" },
-              { key: "ajustada", label: "Meta ajustada", value: d.adjustedGoal, prov: "estimativa" },
-              { key: "contatos", label: "Contatos necessários", value: d.totalContactsNeeded, prov: "estimativa" },
-              { key: "diaria", label: "Meta diária", value: d.dailyContacts, prov: "estimativa" },
+              { key: "meta", label: "Meta de votos", value: cfg.voteGoal, prov: PROV.PREMISSA, unit: "votos" },
+              { key: "ajustada", label: "Meta ajustada", value: d.adjustedGoal, prov: PROV.ESTIMATIVA, unit: "votos" },
+              { key: "contatos", label: "Contatos necessários", value: d.totalContactsNeeded, prov: PROV.ESTIMATIVA, unit: "contatos" },
+              { key: "diaria", label: "Meta diária", value: d.dailyContacts, prov: PROV.ESTIMATIVA, unit: "por dia" },
             ]}
             onSelect={() => setActiveView("funil")}
           />
@@ -1065,127 +1049,204 @@ function ViewVisaoGeral({ cfg, derived, setActiveView }) {
 }
 
 /* ============================================================================
-   VIEW: META ELEITORAL — tela inicial (seção 35): meta, cargo, circunscrição,
-   dias -> CALCULAR FUNIL -> cascata de resultado com fórmulas abertas.
+   VIEW: ELECTORAL GOAL
+   Inputs are live, as everywhere else: a separate "pending" state desyncs from
+   the context bar.
    ========================================================================== */
 
-function ViewMetaEleitoral({ cfg, update, derived }) {
-  const [pending, setPending] = useState({ voteGoal: cfg.voteGoal, office: cfg.office, uf: cfg.uf, campaignDays: cfg.campaignDays });
-  const [calculated, setCalculated] = useState(true);
-  const office = OFFICES.find((o) => o.id === pending.office);
+function ViewMetaEleitoral({ cfg, update, derived, setActiveView }) {
   const d = derived;
-
-  const applyCalc = () => {
-    update({ voteGoal: pending.voteGoal, office: pending.office, uf: pending.uf, campaignDays: pending.campaignDays });
-    setCalculated(true);
-  };
-
+  const office = d.office;
   return (
     <div className="fr-stack">
       <SectionHead eyebrow="Ponto de partida" title="Meta Eleitoral"
-        desc="Transforme uma meta de votos em território, público, contatos, atividades, tempo e recursos." />
+        desc="Transforme uma meta de votos em território, público, contatos, atividades, tempo e recursos. Todo campo recalcula o plano imediatamente." />
 
       <div className="fr-card">
         <div className="fr-grid fr-grid-4">
-          <NumberField label="Qual é a sua meta de votos?" value={pending.voteGoal} onChange={(v) => setPending((p) => ({ ...p, voteGoal: v }))} min={0} step={1000} prov="premissa" />
+          <NumberField label="Qual é a sua meta de votos?" value={cfg.voteGoal}
+            onChange={(v) => update({ voteGoal: v })} min={0} step={1000} prov={PROV.PREMISSA} />
           <div className="fr-field">
-            <div className="fr-field-label"><span>Para qual cargo?</span><ProvBadge type="premissa" /></div>
-            <select value={pending.office} onChange={(e) => setPending((p) => ({ ...p, office: e.target.value }))}>
+            <label className="fr-field-label" htmlFor="office-select">
+              <span>Para qual cargo?</span><ProvBadge type={PROV.PREMISSA} />
+            </label>
+            <select id="office-select" value={cfg.office} onChange={(e) => update({ office: e.target.value })}>
               {OFFICES.filter((o) => o.tipo !== "chapa").map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </div>
           <div className="fr-field">
-            <div className="fr-field-label"><span>Qual é a circunscrição (UF)?</span><ProvBadge type="premissa" /></div>
-            <select value={pending.uf} onChange={(e) => setPending((p) => ({ ...p, uf: e.target.value }))}>
+            <label className="fr-field-label" htmlFor="uf-select">
+              <span>Qual é a circunscrição (UF)?</span><ProvBadge type={PROV.PREMISSA} />
+            </label>
+            <select id="uf-select" value={cfg.uf} onChange={(e) => update(mudarUf(cfg, e.target.value))}>
               {UF_DATA.map((u) => <option key={u.code} value={u.code}>{u.name}</option>)}
             </select>
           </div>
-          <NumberField label="Dias de campanha operacional" value={pending.campaignDays} onChange={(v) => setPending((p) => ({ ...p, campaignDays: v }))} min={1} max={365} prov="premissa" />
+          <NumberField label="Dias de campanha operacional" value={cfg.campaignDays}
+            onChange={(v) => update({ campaignDays: v })} min={1} max={365} prov={PROV.PREMISSA} />
         </div>
-        <div className="fr-row" style={{ marginTop: 14 }}>
-          <button className="fr-btn primary" onClick={applyCalc}><Target size={14} /> Calcular Funil</button>
-          {office?.tipo === "chapa" && <span className="fr-hint">Vices concorrem na chapa do titular — selecione o cargo titular para o cálculo de votos.</span>}
+
+        {office.nivel === "municipal" && (
+          <div className="fr-grid fr-grid-4" style={{ marginTop: 12 }}>
+            <div className="fr-field">
+              <label className="fr-field-label" htmlFor="mun-select">
+                <span>Município</span><ProvBadge type={PROV.PREMISSA} />
+              </label>
+              <select id="mun-select" value={cfg.municipioId} onChange={(e) => update({ municipioId: e.target.value })}>
+                {getMunicipiosDaUf(cfg.uf).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div className="fr-grid fr-grid-half" style={{ marginTop: 14 }}>
+          <SliderField label="Taxa de abstenção esperada" value={cfg.abstentionRate}
+            onChange={(v) => update({ abstentionRate: v })} min={0} max={0.6} prov={PROV.PREMISSA}
+            hint={`Comparecimento resultante: ${fmtPct(d.turnoutRate)}`} />
+          <SliderField label="Taxa de fidelidade do apoio" value={cfg.fidelityRate}
+            onChange={(v) => update({ fidelityRate: v })} min={0.2} max={1} prov={PROV.PREMISSA}
+            hint="Quanto do apoio declarado vira voto na urna." />
         </div>
+
+        {office.nivel === "nacional" && (
+          <div className="fr-alert info" style={{ marginTop: 12 }}>
+            <Info size={15} />
+            <span>Cargo de circunscrição nacional: o cálculo territorial passa a usar as 27 unidades da federação, não a UF selecionada acima.</span>
+          </div>
+        )}
       </div>
 
-      {calculated && office && <OfficeRulesCard cfg={cfg} update={update} derived={d} />}
+      <OfficeRulesCard cfg={cfg} update={update} derived={d} />
 
-      {calculated && (
-        <div className="fr-card">
-          <h2 className="fr-h2">Resultado</h2>
-          <div style={{ marginTop: 14, maxWidth: 560, marginLeft: "auto", marginRight: "auto" }}>
-            <FunnelDiagram
-              stages={[
-                { key: "meta", label: "Meta", value: cfg.voteGoal, prov: "premissa" },
-                { key: "ajustada", label: "Meta ajustada", value: d.adjustedGoal, prov: "estimativa" },
-                { key: "contatos", label: "Contatos necessários", value: d.totalContactsNeeded, prov: "estimativa" },
-                { key: "diaria", label: "Contatos / dia", value: d.dailyContacts, prov: "estimativa" },
-                { key: "capacidade", label: "Capacidade atual", value: d.dailyCapacity, prov: "estimativa" },
-                { key: "deficit", label: d.capacityGap >= 0 ? "Superávit diário" : "Déficit diário", value: Math.abs(d.capacityGap), prov: "estimativa" },
-              ]}
-            />
-          </div>
-          <div style={{ marginTop: 16 }}>
-            <Formula
-              title="Veja como chegamos a este número"
-              formula={`META_AJUSTADA = META_VOTOS / (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)\nTAXA_COMPARECIMENTO = 1 − TAXA_ABSTENÇÃO\n\nCONTATOS_NECESSÁRIOS = Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) / CONVERSÃO_CANAL ]\n\nCONTATOS/DIA = CONTATOS_NECESSÁRIOS / DIAS_DE_CAMPANHA`}
-              variables={[
-                { name: "META_VOTOS", value: fmtInt(cfg.voteGoal), prov: "premissa" },
-                { name: "TAXA_ABSTENÇÃO", value: fmtPct(d.scenario.abstentionRate), prov: "premissa" },
-                { name: "TAXA_FIDELIDADE", value: fmtPct(d.scenario.fidelityRate), prov: "premissa" },
-                { name: "DIAS_DE_CAMPANHA", value: fmtInt(cfg.campaignDays), prov: "premissa" },
-                { name: "CENÁRIO ATIVO", value: d.preset.label, prov: "premissa" },
-              ]}
-            >
-              <p style={{ marginTop: 8 }}>Cada canal (corpo a corpo, porta a porta, digital etc.) tem sua própria taxa de conversão — ajuste em <b>Canais</b>. Nenhum arredondamento ocorre nos cálculos internos, apenas na exibição.</p>
-            </Formula>
-          </div>
+      <div className="fr-card">
+        <h2 className="fr-h2">Resultado</h2>
+        <p className="fr-desc">Da meta declarada até o que a estrutura atual entrega por dia.</p>
+        <div style={{ marginTop: 14, maxWidth: 620, marginLeft: "auto", marginRight: "auto" }}>
+          <FunnelDiagram
+            onSelect={() => setActiveView("funil")}
+            stages={[
+              { key: "meta", label: "Meta", value: cfg.voteGoal, prov: PROV.PREMISSA, unit: "votos" },
+              { key: "ajustada", label: "Meta ajustada", value: d.adjustedGoal, prov: PROV.ESTIMATIVA, unit: "votos" },
+              { key: "contatos", label: "Contatos necessários", value: d.totalContactsNeeded, prov: PROV.ESTIMATIVA, unit: "contatos" },
+              { key: "diaria", label: "Contatos / dia", value: d.dailyContacts, prov: PROV.ESTIMATIVA, unit: "por dia" },
+              { key: "capacidade", label: "Capacidade atual / dia", value: d.dailyCapacity, prov: PROV.ESTIMATIVA, unit: "por dia" },
+              {
+                key: "gap", label: d.capacityGap >= 0 ? "Superávit diário" : "Déficit diário",
+                value: Math.abs(d.capacityGap), prov: PROV.ESTIMATIVA, unit: "contatos",
+              },
+            ]}
+          />
         </div>
-      )}
+
+        <div className="fr-grid fr-grid-3" style={{ marginTop: 18 }}>
+          <Kpi label="Eleitorado da circunscrição" value={fmtInt(d.eleitoradoElegivel)} prov={PROV.HISTORICO} />
+          <Kpi label="Votos esperados (comparecimento)" value={fmtInt(d.eleitoradoEfetivo)} prov={PROV.ESTIMATIVA} />
+          <Kpi label="Meta como fatia dos votos" value={fmtPct(d.goalShareOfElectorate)}
+            tone={d.goalShareOfElectorate > 0.15 && d.office.tipo === "proporcional" ? "danger" : undefined}
+            prov={PROV.ESTIMATIVA} />
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <Formula
+            title="Veja como chegamos a este número"
+            formula={"META_AJUSTADA = META_VOTOS / (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)\nTAXA_COMPARECIMENTO = 1 − TAXA_ABSTENÇÃO\n\nCONTATOS_NECESSÁRIOS = Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) / CONVERSÃO_CANAL ]\n\nCONTATOS/DIA = CONTATOS_NECESSÁRIOS / DIAS_DE_CAMPANHA\n\nVOTOS_ESPERADOS = ELEITORADO × TAXA_COMPARECIMENTO   (teto físico da meta)"}
+            variables={[
+              { name: "META_VOTOS", value: fmtInt(cfg.voteGoal), prov: PROV.PREMISSA },
+              { name: "TAXA_ABSTENÇÃO", value: fmtPct(d.scenario.abstentionRate), prov: PROV.PREMISSA },
+              { name: "TAXA_FIDELIDADE", value: fmtPct(d.scenario.fidelityRate), prov: PROV.PREMISSA },
+              { name: "DIAS_DE_CAMPANHA", value: fmtInt(cfg.campaignDays), prov: PROV.PREMISSA },
+              { name: "ELEITORADO", value: fmtInt(d.eleitoradoElegivel), prov: PROV.HISTORICO },
+              { name: "CENÁRIO ATIVO", value: d.preset.label, prov: PROV.PREMISSA },
+            ]}
+          >
+            <p style={{ marginTop: 8 }}>
+              Cada canal (corpo a corpo, porta a porta, digital etc.) tem sua própria taxa de conversão — ajuste em <b>Canais</b>.
+              Nenhum arredondamento ocorre nos cálculos internos, apenas na exibição.
+            </p>
+          </Formula>
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: FUNIL REVERSO — cascata completa (13 etapas), navegação bidirecional,
-   identificação de gargalos, e o Grafo Eleitoral Operacional (seção 42).
+   VIEW: REVERSE FUNNEL
    ========================================================================== */
 
-function ViewFunilReverso({ cfg, derived }) {
+function ViewFunilReverso({ cfg, derived, setActiveView }) {
   const d = derived;
   const [direction, setDirection] = useState("down");
   const [activeKey, setActiveKey] = useState(null);
-
-  const totalActions = d.channelResults.reduce((a, c) => a + (c.enabled ? c.actionsNeeded : 0), 0);
-  const totalTeam = cfg.team.coordenadores + cfg.team.mobilizadores;
-  const segmentsCount = 5 + 2; // faixas etárias padrão + gêneros — ver módulo Públicos
+  const totalTeam = (cfg.team.coordenadores || 0) + (cfg.team.mobilizadores || 0);
 
   const stageValues = {
-    meta: cfg.voteGoal, ajustada: d.adjustedGoal, apoios: d.adjustedGoal, eleitoresAlvo: d.adjustedGoal,
-    segmentos: segmentsCount, territorios: d.territories.length, canais: d.channelResults.filter((c) => c.enabled).length,
-    contatos: d.totalContactsNeeded, atividades: totalActions, equipe: totalTeam, dias: cfg.campaignDays,
-    metaDiaria: d.dailyContacts, metaAgente: d.metaPorMobilizador,
+    meta: cfg.voteGoal,
+    ajustada: d.adjustedGoal,
+    apoios: d.adjustedGoal,
+    eleitoresAlvo: d.eleitoresAlvo,
+    contatos: d.totalContactsNeeded,
+    atividades: d.totalActions,
+    metaDiaria: d.dailyContacts,
+    metaAgente: d.metaPorMobilizador,
+    segmentos: d.segmentsCount,
+    territorios: d.territoriosPrioritarios.length,
+    canais: d.enabledChannels.length,
+    equipe: totalTeam,
+    dias: cfg.campaignDays,
   };
-  const bottleneckKeys = d.capacityStatus === "insuficiente" ? ["equipe", "dias", "metaDiaria", "metaAgente"] : [];
-
+  const bottleneckKeys = d.capacityStatus === "insuficiente" ? ["equipe", "metaDiaria", "metaAgente"] : [];
   const stages = FUNNEL_STAGES_META.map((s) => ({ ...s, value: stageValues[s.key] }));
-  const ordered = direction === "down" ? stages : [...stages].reverse();
+  const volume = stages.filter((s) => s.kind !== "estrutura");
+  const estrutura = stages.filter((s) => s.kind === "estrutura");
+  const ordered = direction === "down" ? [...volume, ...estrutura] : [...[...volume].reverse(), ...estrutura];
   const activeStage = stages.find((s) => s.key === activeKey);
 
   const stageDetail = {
-    meta: { formula: "Entrada direta.", vars: [] },
-    ajustada: { formula: "META_VOTOS / (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)", vars: [["TAXA_COMPARECIMENTO", fmtPct(d.turnoutRate)], ["TAXA_FIDELIDADE", fmtPct(d.scenario.fidelityRate)]] },
-    apoios: { formula: "≈ META_AJUSTADA (mesmo patamar; refinado por canal em 'Canais').", vars: [] },
-    eleitoresAlvo: { formula: "Universo de eleitores compatível com a meta ajustada, antes da segmentação.", vars: [] },
-    segmentos: { formula: "Contagem de segmentos configurados em Públicos.", vars: [] },
-    territorios: { formula: "Territórios selecionados em Territórios, ponderados pelos pesos definidos.", vars: [] },
-    canais: { formula: "Canais habilitados em Canais.", vars: [] },
-    contatos: { formula: "Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) / CONVERSÃO_CANAL ]", vars: d.channelResults.filter((c) => c.enabled).map((c) => [c.label, fmtInt(c.contactsNeeded)]) },
-    atividades: { formula: "Σ canal [ CONTATOS_NECESSÁRIOS_CANAL / MULTIPLICADOR_DA_CADEIA_CANAL ]", vars: d.channelResults.filter((c) => c.enabled).map((c) => [`${c.label} (${c.unit})`, fmtInt(c.actionsNeeded)]) },
-    equipe: { formula: "Coordenadores + mobilizadores configurados em Equipes.", vars: [["Coordenadores", fmtInt(cfg.team.coordenadores)], ["Mobilizadores", fmtInt(cfg.team.mobilizadores)]] },
-    dias: { formula: "Entrada direta (Meta Eleitoral / Agenda).", vars: [] },
-    metaDiaria: { formula: "CONTATOS_NECESSÁRIOS / DIAS_DE_CAMPANHA", vars: [] },
-    metaAgente: { formula: "META_DIÁRIA / Nº_MOBILIZADORES", vars: [] },
+    meta: { formula: "Entrada direta (Meta Eleitoral).", vars: [] },
+    ajustada: {
+      formula: "META_VOTOS / (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)",
+      vars: [["TAXA_COMPARECIMENTO", fmtPct(d.turnoutRate)], ["TAXA_FIDELIDADE", fmtPct(d.scenario.fidelityRate)]],
+    },
+    apoios: {
+      formula: "APOIOS = META_AJUSTADA\n(1:1 por definição: a meta ajustada JÁ é o número de apoios declarados\nnecessários para produzir os votos desejados.)",
+      vars: [],
+    },
+    eleitoresAlvo: {
+      formula: "ELEITORES_ALVO = Σ território priorizado [ ELEITORADO × TAXA_COMPARECIMENTO ]\n\nUniverso de eleitores que efetivamente comparecem nos territórios\npriorizados — o denominador real do esforço.",
+      vars: [
+        ["Territórios priorizados", fmtInt(d.territoriosPrioritarios.length)],
+        ["Eleitorado priorizado", fmtInt(d.territoriosPrioritarios.reduce((a, t) => a + t.eleitores, 0))],
+        ["Penetração exigida", fmtPct(safeDiv(d.adjustedGoal, d.eleitoresAlvo))],
+      ],
+    },
+    contatos: {
+      formula: "Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) / CONVERSÃO_CANAL ]",
+      vars: d.enabledChannels.map((c) => [c.label, fmtInt(c.contactsNeeded)]),
+    },
+    atividades: {
+      formula: "Σ canal [ CONTATOS_NECESSÁRIOS_CANAL / MULTIPLICADOR_DA_CADEIA_CANAL ]",
+      vars: d.enabledChannels.map((c) => [`${c.label} (${c.unit})`, fmtInt(c.actionsNeeded)]),
+    },
+    metaDiaria: { formula: "CONTATOS_NECESSÁRIOS / DIAS_DE_CAMPANHA", vars: [["Dias", fmtInt(cfg.campaignDays)]] },
+    metaAgente: { formula: "META_DIÁRIA / Nº_MOBILIZADORES", vars: [["Mobilizadores", fmtInt(cfg.team.mobilizadores)]] },
+    segmentos: {
+      formula: "FAIXAS_ETÁRIAS + SEGMENTOS_TEMÁTICOS configurados em Públicos.",
+      vars: [
+        ["Faixas etárias", fmtInt(cfg.publicos?.faixas?.length || 0)],
+        ["Temáticos", fmtInt(cfg.publicos?.tematicos?.length || 0)],
+      ],
+    },
+    territorios: {
+      formula: "Territórios priorizados em Territórios (exclui o bucket 'Restante do estado').",
+      vars: d.territoriosPrioritarios.slice(0, 8).map((t) => [t.name, fmtInt(t.metaTerritorial)]),
+    },
+    canais: { formula: "Canais habilitados em Canais.", vars: d.enabledChannels.map((c) => [c.label, fmtPct(c.share)]) },
+    equipe: {
+      formula: "COORDENADORES + MOBILIZADORES configurados em Equipes.",
+      vars: [["Coordenadores", fmtInt(cfg.team.coordenadores)], ["Mobilizadores", fmtInt(cfg.team.mobilizadores)]],
+    },
+    dias: { formula: "Entrada direta (Meta Eleitoral / Agenda).", vars: [["Dias ativos na Agenda", fmtInt(d.diasAtivosAgenda)]] },
   };
 
   return (
@@ -1194,28 +1255,37 @@ function ViewFunilReverso({ cfg, derived }) {
         desc="Da meta de votos até a meta por agente — e o caminho inverso, para localizar onde a operação trava." />
 
       <div className="fr-card">
-        <div className="fr-row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-          <SegmentedControl
+        <div className="fr-row fr-between fr-row-wrap" style={{ marginBottom: 10 }}>
+          <SegmentedControl ariaLabel="Direção do funil"
             options={[{ value: "down", label: "Meta → Ação" }, { value: "up", label: "Ação → Meta" }]}
-            value={direction} onChange={setDirection}
-          />
+            value={direction} onChange={setDirection} />
           {bottleneckKeys.length > 0 && (
-            <span className="fr-badge" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>
-              <AlertTriangle size={11} /> Gargalo detectado a partir de "Equipe necessária"
-            </span>
+            <span className="fr-badge perigo"><AlertTriangle size={11} /> Gargalo na capacidade da equipe</span>
           )}
         </div>
-        <FunnelDiagram stages={ordered} onSelect={setActiveKey} activeKey={activeKey} />
-        {activeStage && (
+        <FunnelDiagram stages={ordered} onSelect={(k) => setActiveKey(k === activeKey ? null : k)} activeKey={activeKey} />
+        {activeStage ? (
           <div style={{ marginTop: 14 }}>
-            <Formula
-              title={`Como "${activeStage.label}" foi calculado?`}
-              formula={stageDetail[activeStage.key]?.formula}
-              variables={(stageDetail[activeStage.key]?.vars || []).map(([name, value]) => ({ name, value }))}
-            />
+            <div className="fr-card" style={{ background: "var(--paper)" }}>
+              <div className="fr-row fr-between">
+                <h2 className="fr-h2">{activeStage.label}</h2>
+                <ProvBadge type={activeStage.prov} />
+              </div>
+              <FormulaBox style={{ marginTop: 8 }}>{stageDetail[activeStage.key]?.formula}</FormulaBox>
+              {(stageDetail[activeStage.key]?.vars || []).length > 0 && (
+                <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5, color: "var(--text-soft)" }}>
+                  {stageDetail[activeStage.key].vars.map(([name, value], i) => (
+                    <li key={i} style={{ marginBottom: 3 }}>
+                      <span className="fr-mono" style={{ fontWeight: 600 }}>{name}</span>: {value}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
+        ) : (
+          <p className="fr-hint" style={{ marginTop: 10 }}>Clique em qualquer etapa para ver a fórmula e as variáveis que a compõem.</p>
         )}
-        {!activeStage && <p className="fr-hint" style={{ marginTop: 10 }}>Clique em qualquer etapa para ver a fórmula e as variáveis que a compõem.</p>}
       </div>
 
       <div className="fr-card">
@@ -1223,17 +1293,26 @@ function ViewFunilReverso({ cfg, derived }) {
         <p className="fr-desc">Estrutura da candidatura em quatro ramos. O ramo com gargalo aparece destacado.</p>
         <div className="fr-grid fr-grid-4" style={{ marginTop: 14 }}>
           {[
-            { title: "Território", icon: <Map size={14} />, items: d.territories.map((t) => `${t.name} — ${fmtInt(t.metaTerritorial)} votos`), gargalo: false },
-            { title: "Públicos", icon: <Users size={14} />, items: [`${segmentsCount} segmentos configurados`], gargalo: false },
-            { title: "Canais", icon: <Radio size={14} />, items: d.channelResults.filter((c) => c.enabled).map((c) => `${c.label} — ${fmtInt(c.contactsNeeded)} contatos`), gargalo: false },
-            { title: "Equipes", icon: <UsersRound size={14} />, items: [`${cfg.team.coordenadores} coordenação`, `${cfg.team.mobilizadores} mobilização`], gargalo: bottleneckKeys.length > 0 },
+            { title: "Território", icon: <Map size={14} />, view: "territorios", items: d.territories.map((t) => `${t.name} — ${fmtInt(t.metaTerritorial)} votos`), gargalo: false },
+            { title: "Públicos", icon: <Users size={14} />, view: "publicos", items: [`${d.segmentsCount} segmento(s) configurado(s)`], gargalo: d.segmentsCount === 0 },
+            { title: "Canais", icon: <Radio size={14} />, view: "canais", items: d.enabledChannels.map((c) => `${c.label} — ${fmtInt(c.contactsNeeded)} contatos`), gargalo: Math.abs(d.enabledShareSum - 1) > 0.01 },
+            { title: "Equipes", icon: <UsersRound size={14} />, view: "equipes", items: [`${fmtInt(cfg.team.coordenadores)} coordenação`, `${fmtInt(cfg.team.mobilizadores)} mobilização`], gargalo: bottleneckKeys.length > 0 },
           ].map((branch) => (
-            <div key={branch.title} className="fr-card" style={{ padding: 12, borderColor: branch.gargalo ? "var(--danger)" : "var(--line)", background: branch.gargalo ? "var(--danger-soft)" : "var(--paper)" }}>
-              <div className="fr-row" style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>{branch.icon} {branch.title}{branch.gargalo && <AlertTriangle size={13} color="var(--danger)" />}</div>
-              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, color: "var(--text-soft)" }}>
+            <button key={branch.title} type="button" onClick={() => setActiveView(branch.view)}
+              className="fr-card" style={{
+                padding: 12, textAlign: "left", cursor: "pointer", font: "inherit",
+                borderColor: branch.gargalo ? "var(--danger)" : "var(--line)",
+                background: branch.gargalo ? "var(--danger-soft)" : "var(--paper)",
+              }}>
+              <div className="fr-row" style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>
+                {branch.icon} {branch.title}
+                {branch.gargalo && <AlertTriangle size={13} color="var(--danger)" />}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12, color: "var(--text-soft)" }}>
                 {branch.items.slice(0, 5).map((it, i) => <li key={i} style={{ marginBottom: 3 }}>{it}</li>)}
+                {branch.items.length > 5 && <li className="fr-hint">+{branch.items.length - 5} outros</li>}
               </ul>
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -1242,13 +1321,23 @@ function ViewFunilReverso({ cfg, derived }) {
 }
 
 /* ============================================================================
-   VIEW: TERRITÓRIOS — pesos, distribuição da meta, matriz potencial x esforço.
+   VIEW: TERRITORIES
    ========================================================================== */
 
-const WEIGHT_LABELS = { eleitorado: "Eleitorado", historico: "Histórico eleitoral", comparecimento: "Comparecimento", presenca: "Presença territorial", capacidade: "Capacidade operacional", logistica: "Logística (custo)" };
+const WEIGHT_LABELS = {
+  eleitorado: "Eleitorado",
+  historico: "Desempenho histórico da candidatura",
+  comparecimento: "Comparecimento local",
+  presenca: "Presença territorial",
+  capacidade: "Capacidade operacional",
+  logistica: "Logística (penalidade de custo)",
+};
 
 function ViewTerritorios({ cfg, update, derived }) {
   const d = derived;
+  const office = d.office;
+  const detalhado = office.nivel === "estadual" && getMunicipiosDaUf(cfg.uf).length > 0;
+
   const toggleTerritorio = (id) => {
     const sel = cfg.territoriosSelecionados.includes(id)
       ? cfg.territoriosSelecionados.filter((x) => x !== id)
@@ -1256,6 +1345,22 @@ function ViewTerritorios({ cfg, update, derived }) {
     update({ territoriosSelecionados: sel.length ? sel : cfg.territoriosSelecionados });
   };
   const setWeight = (key, v) => update({ territorialWeights: { ...cfg.territorialWeights, [key]: v } });
+  /** The four sourceless criteria, stored per territory in cfg. */
+  const setParam = (id, campo, valor) => update({
+    territorioParams: {
+      ...(cfg.territorioParams || {}),
+      [id]: { ...getParamsTerritorio(cfg, id), [campo]: valor },
+    },
+  });
+  const limparParams = () => update({ territorioParams: {} });
+  const paramsInformados = Object.keys(cfg.territorioParams || {}).length;
+  const normalizarPesos = () => {
+    const total = Object.values(cfg.territorialWeights).reduce((a, b) => a + b, 0);
+    if (!total) return;
+    const next = {};
+    Object.entries(cfg.territorialWeights).forEach(([k, v]) => { next[k] = Math.round((v / total) * 100) / 100; });
+    update({ territorialWeights: next });
+  };
 
   const matrixData = d.territories.map((t) => ({
     name: t.name, potencial: Math.round(t.score * 1000) / 10, esforco: Math.round(t.logisticaNorm * 100),
@@ -1266,98 +1371,261 @@ function ViewTerritorios({ cfg, update, derived }) {
       <SectionHead eyebrow="Capilaridade" title="Territórios"
         desc="Selecione territórios, ajuste os pesos e veja como a meta ajustada se distribui no mapa operacional." />
 
-      {cfg.uf !== "SP" && (
-        <div className="fr-alert info"><Info size={15} /><span>Esta demonstração detalha o recorte município a município apenas para São Paulo (o exemplo obrigatório do briefing, Deputado Federal/SP). Para {getUf(cfg).name}, o cálculo usa o estado como território único até a importação real do TSE.</span></div>
+      {office.nivel === "nacional" && (
+        <div className="fr-alert info"><Info size={15} /><span>Cargo nacional: a meta é distribuída entre as 27 unidades da federação.</span></div>
+      )}
+      {office.nivel === "municipal" && (
+        <div className="fr-alert info"><Info size={15} /><span>Cargo municipal: a meta fica concentrada em {getMunicipio(cfg)?.name || getUf(cfg).name}. Troque o município em Meta Eleitoral.</span></div>
+      )}
+      {office.nivel === "estadual" && detalhado && (
+        <div className="fr-alert info"><Info size={15} /><span>
+          O recorte traz os {getMunicipiosDaUf(cfg.uf).length} maiores municípios de {getUf(cfg).name} por eleitorado,
+          com o eleitorado e o comparecimento apurados pelo TSE. Os demais {fmtInt(Math.max(0, getUf(cfg).municipios - getMunicipiosDaUf(cfg.uf).length))} municípios
+          entram somados em "Restante do estado".
+        </span></div>
+      )}
+      {office.nivel === "estadual" && !detalhado && (
+        <div className="fr-alert atencao"><AlertTriangle size={15} /><span>
+          Não há recorte municipal para {getUf(cfg).name} nesta versão: o cálculo usa o estado como território único.
+        </span></div>
       )}
 
-      <div className="fr-grid" style={{ gridTemplateColumns: "1.3fr 1fr", alignItems: "start" }}>
-        <div className="fr-card">
-          <h2 className="fr-h2">Distribuição da meta por território</h2>
-          <p className="fr-desc">META_TERRITORIAL = META_TOTAL × PESO_TERRITORIAL (pesos editáveis ao lado)</p>
-          <div className="fr-scroll-x" style={{ marginTop: 12 }}>
-            <table className="fr-table">
-              <thead><tr><th>Território</th><th className="num">Eleitorado (M)</th><th className="num">Comparecimento hist.</th><th className="num">Score</th><th className="num">Participação</th><th className="num">Meta territorial</th></tr></thead>
-              <tbody>
-                {d.territories.map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.name}</td>
-                    <td className="num">{fmtDec(t.eleitoradoM, 1)}</td>
-                    <td className="num">{fmtPct(t.comparecimentoNorm)}</td>
-                    <td className="num">{fmtDec(t.score, 2)}</td>
+      <div className="fr-card">
+        <TituloComInfo title="Distribuição da meta por território"
+          rotulo="Abrir a conta da distribuição territorial">
+          <FormulaBox>{"SCORE = Σ critério [ VALOR_NORMALIZADO × PESO ] − LOGÍSTICA_NORM × PESO_LOGÍSTICA\n\nVALOR_NORMALIZADO = VALOR ÷ MAIOR_VALOR_DA_LISTA\n\nMETA_TERRITORIAL = META_AJUSTADA × (SCORE ÷ Σ SCORES)\n\nVOTANTES_ESPERADOS = ELEITORADO × COMPARECIMENTO_MEDIDO\nPENETRAÇÃO_EXIGIDA = META_TERRITORIAL ÷ VOTANTES_ESPERADOS"}</FormulaBox>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+            <li>META_AJUSTADA: {fmtInt(d.adjustedGoal)} <ProvBadge type={PROV.ESTIMATIVA} /></li>
+            <li>Ano de referência: {d.anoReferencia} <ProvBadge type={PROV.HISTORICO} fonte={`COMPARECIMENTO_${d.anoReferencia}`} /></li>
+            <li>Σ pesos: {fmtPct(d.weightSum)} <ProvBadge type={PROV.PREMISSA} /></li>
+          </ul>
+          <p style={{ marginTop: 8 }}>
+            A coluna <b>penetração exigida</b> mostra quanto dos votos daquele território a meta
+            pede — é ela que revela um peso mal calibrado.
+          </p>
+          <p style={{ marginTop: 6 }}>
+            Eleitorado e comparecimento são medidos; histórico, presença, capacidade e logística
+            são informados pela equipe e começam neutros — enquanto ninguém os informa, eles não
+            desempatam nada e a meta se distribui por eleitorado e comparecimento.
+          </p>
+        </TituloComInfo>
+        <div className="fr-scroll-x" style={{ marginTop: 12 }}>
+          <table className="fr-table">
+            <thead>
+              <tr>
+                <th rowSpan={2}>Território</th>
+                <th className="num" colSpan={3}>Medido pelo TSE</th>
+                {/* O rótulo vem de PROV_DO_CAMPO, não de uma suposição da
+                    tela: se um critério algum dia ganhar fonte, o cabeçalho
+                    deixa de chamá-lo de premissa sozinho. */}
+                <th className="num fr-th-premissa" colSpan={PARAMS_TERRITORIAIS_CAMPOS.length}
+                  title={PARAMS_TERRITORIAIS_CAMPOS.map((c) => `${c}: ${PROV_LABEL[PROV_DO_CAMPO[c]]}`).join(" · ")}>
+                  {PARAMS_TERRITORIAIS_CAMPOS.every((c) => PROV_DO_CAMPO[c] === PROV.PREMISSA)
+                    ? "Informado pela equipe (0–100)"
+                    : "Critérios adicionais (0–100)"}
+                </th>
+                <th className="num" colSpan={3}>Resultado</th>
+              </tr>
+              <tr>
+                <th className="num">Eleitorado</th>
+                <th className="num">% do total</th>
+                <th className="num">Comparecimento {d.anoReferencia}</th>
+                <th className="num fr-th-premissa">Histórico</th>
+                <th className="num fr-th-premissa">Presença</th>
+                <th className="num fr-th-premissa">Capacidade</th>
+                <th className="num fr-th-premissa">Logística</th>
+                <th className="num">% da meta</th>
+                <th className="num">Meta territorial</th>
+                <th className="num">Penetração exigida</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.territories.map((t) => {
+                const alto = t.penetracaoNecessaria > 0.35;
+                const params = getParamsTerritorio(cfg, t.id);
+                return (
+                  <tr key={t.id} className={cx(t.resto && "resto")}>
+                    <td title={t.name}>{t.name}{t.resto && <span className="fr-hint"> (não priorizado)</span>}</td>
+                    <td className="num">{fmtInt(t.eleitores)}</td>
+                    <td className="num">{fmtPct(t.eleitoradoShare)}</td>
+                    <td className="num">{fmtPct(t.comparecimento)}</td>
+                    {PARAMS_TERRITORIAIS_CAMPOS.map((campo) => (
+                      <td className="num" key={campo}>
+                        <input className="fr-param-input" type="number" min={0} max={100} step={5}
+                          aria-label={`${campo} em ${t.name}`}
+                          value={Math.round(params[campo] * 100)}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            if (Number.isFinite(v)) setParam(t.id, campo, Math.max(0, Math.min(100, v)) / 100);
+                          }} />
+                      </td>
+                    ))}
                     <td className="num">{fmtPct(t.share)}</td>
                     <td className="num" style={{ fontWeight: 700 }}>{fmtInt(t.metaTerritorial)}</td>
+                    <td className="num" style={{ color: alto ? "var(--danger-ink)" : undefined, fontWeight: alto ? 700 : 400 }}>
+                      {fmtPct(t.penetracaoNecessaria, 2)}
+                    </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {cfg.uf === "SP" && (
-            <>
-              <div className="fr-hint" style={{ marginTop: 12, marginBottom: 6 }}>Municípios incluídos na distribuição:</div>
-              <div className="fr-chip-list">
-                {SP_MUNICIPIOS.map((m) => (
-                  <button key={m.id} type="button" className={cx("fr-chip", cfg.territoriosSelecionados.includes(m.id) && "on")} onClick={() => toggleTerritorio(m.id)}>
-                    {m.name}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>Total</td>
+                <td className="num">{fmtInt(d.territories.reduce((a, t) => a + t.eleitores, 0))}</td>
+                <td className="num">100,0%</td>
+                <td className="num">{fmtPct(d.comparecimentoHistorico)}</td>
+                {PARAMS_TERRITORIAIS_CAMPOS.map((c) => <td key={c} />)}
+                <td className="num">{fmtPct(d.territories.reduce((a, t) => a + t.share, 0))}</td>
+                <td className="num">{fmtInt(d.territories.reduce((a, t) => a + t.metaTerritorial, 0))}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div className="fr-row fr-between fr-row-wrap" style={{ marginTop: 10, gap: 8 }}>
+          <span className="fr-hint">
+            As quatro colunas do meio não têm fonte externa — são o que a equipe sabe do território.
+            Começam neutras (50) e só passam a pesar quando você as diferencia.
+            {paramsInformados > 0 && ` ${paramsInformados} território(s) informado(s).`}
+          </span>
+          <button className="fr-btn sm" onClick={limparParams} disabled={paramsInformados === 0}>
+            <RotateCcw size={12} /> Voltar ao neutro
+          </button>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <Fonte id="ELEITORADO_2026" compacto />
         </div>
 
-        <div className="fr-card">
-          <h2 className="fr-h2">Pesos territoriais</h2>
-          <ProvBadge type="premissa" />
-          <div className="fr-stack" style={{ marginTop: 10, gap: 12 }}>
-            {Object.entries(cfg.territorialWeights).map(([key, val]) => (
-              <SliderField key={key} label={WEIGHT_LABELS[key]} value={val} onChange={(v) => setWeight(key, v)} min={0} max={0.6} step={0.01} />
-            ))}
-          </div>
-          <div className="fr-hint" style={{ marginTop: 8 }}>Soma atual: <b className="fr-num">{fmtPct(d.weightSum)}</b> (ideal: 100%)</div>
-        </div>
+        {detalhado && (
+          <>
+            <div className="fr-hint" style={{ marginTop: 14, marginBottom: 6 }}>Municípios priorizados na distribuição:</div>
+            <div className="fr-chip-list">
+              {getMunicipiosDaUf(cfg.uf).map((m) => (
+                <button key={m.id} type="button" aria-pressed={cfg.territoriosSelecionados.includes(m.id)}
+                  className={cx("fr-chip", cfg.territoriosSelecionados.includes(m.id) && "on")}
+                  onClick={() => toggleTerritorio(m.id)}>
+                  {m.name}
+                </button>
+              ))}
+            </div>
+            <label className="fr-row" style={{ marginTop: 12, fontSize: 12.5 }}>
+              <input type="checkbox" checked={cfg.incluirRestoDoEstado}
+                onChange={(e) => update({ incluirRestoDoEstado: e.target.checked })} />
+              Incluir o "Restante do estado" na distribuição
+            </label>
+            <p className="fr-hint" style={{ marginTop: 4 }}>
+              Desligado, 100% da meta é atribuída apenas aos municípios priorizados — o que assume,
+              implicitamente, zero voto no restante de {getUf(cfg).name}.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="fr-card">
-        <h2 className="fr-h2">Matriz de prioridade — potencial × esforço</h2>
-        <p className="fr-desc">Classificação operacional derivada dos parâmetros inseridos — não é um veredito sobre "melhores territórios".</p>
-        <div style={{ height: 300, marginTop: 12 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-              <CartesianGrid stroke="#E1E4EA" />
-              <XAxis type="number" dataKey="potencial" name="Potencial (score)" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} />
-              <YAxis type="number" dataKey="esforco" name="Esforço logístico" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} />
-              <ZAxis range={[80, 80]} />
-              <Tooltip cursor={{ strokeDasharray: "3 3" }} contentStyle={{ fontSize: 12, fontFamily: "IBM Plex Sans" }} />
-              <ReferenceLine x={matrixData.length ? matrixData.reduce((a, m) => a + m.potencial, 0) / matrixData.length : 0} stroke="#C7CCD6" />
-              <ReferenceLine y={matrixData.length ? matrixData.reduce((a, m) => a + m.esforco, 0) / matrixData.length : 0} stroke="#C7CCD6" />
-              <Scatter data={matrixData} fill="#21418F" />
-            </ScatterChart>
-          </ResponsiveContainer>
+        <h2 className="fr-h2">Pesos territoriais</h2>
+        <ProvBadge type={PROV.PREMISSA} />
+        <p className="fr-desc" style={{ marginTop: 6 }}>
+          Os seis critérios são normalizados de 0 a 1 antes da ponderação, então os pesos são
+          diretamente comparáveis entre si.
+        </p>
+        <div className="fr-grid fr-grid-3" style={{ marginTop: 10 }}>
+          {Object.entries(cfg.territorialWeights).map(([key, val]) => (
+            <SliderField key={key} label={WEIGHT_LABELS[key] || key} value={val}
+              onChange={(v) => setWeight(key, v)} min={0} max={0.6} step={0.01} />
+          ))}
+        </div>
+        <div className="fr-divider" />
+        <div className="fr-field">
+          <label className="fr-field-label" htmlFor="hist-ref">
+            <span>Eleição de referência para o comparecimento</span>
+            <ProvBadge type={PROV.HISTORICO} fonte={`COMPARECIMENTO_${d.anoReferencia}`} />
+          </label>
+          <select id="hist-ref" value={cfg.histRefYear} onChange={(e) => update({ histRefYear: Number(e.target.value) })}>
+            {ANOS_REFERENCIA.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <span className="fr-hint">
+            Define o comparecimento de cada território e, com ele, os votos esperados
+            ({fmtInt(Math.round(d.eleitoradoEfetivo))} nesta configuração — {fmtPct(d.comparecimentoHistorico)} do eleitorado).
+            Não altera a premissa de abstenção, que é sua e fica em Meta Eleitoral.
+          </span>
+          <div style={{ marginTop: 6 }}><Fonte id={`COMPARECIMENTO_${d.anoReferencia}`} compacto /></div>
+        </div>
+        <div className="fr-row fr-between" style={{ marginTop: 12 }}>
+          <span className="fr-hint">Soma atual: <b className="fr-num">{fmtPct(d.weightSum)}</b> (ideal: 100%)</span>
+          <button className="fr-btn sm" onClick={normalizarPesos} disabled={Math.abs(d.weightSum - 1) < 0.005}>
+            <RefreshCw size={12} /> Normalizar
+          </button>
         </div>
       </div>
+
+      <ResearcherOnly>
+        <div className="fr-card">
+          <h2 className="fr-h2">Matriz de prioridade — potencial × esforço</h2>
+          <p className="fr-desc">Classificação operacional derivada dos parâmetros inseridos — não é um veredito sobre "melhores territórios".</p>
+          <div style={{ height: 320, marginTop: 12 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart margin={{ top: 10, right: 24, bottom: 24, left: 8 }}>
+                <CartesianGrid stroke="#E4E4E6" />
+                <XAxis type="number" dataKey="potencial" name="Potencial"
+                  label={{ value: "Potencial (score)", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4B4D53" } }}
+                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }} />
+                <YAxis type="number" dataKey="esforco" name="Esforço"
+                  label={{ value: "Esforço logístico", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4B4D53" } }}
+                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }} />
+                <ZAxis range={[90, 90]} />
+                <Tooltip cursor={{ strokeDasharray: "3 3" }}
+                  contentStyle={{ fontSize: 12, fontFamily: "IBM Plex Sans" }}
+                  formatter={(v, n) => [v, n]}
+                  labelFormatter={() => ""}
+                  content={({ payload }) => {
+                    if (!payload?.length) return null;
+                    const p = payload[0].payload;
+                    return (
+                      <div style={{ background: "#fff", border: "1px solid #E4E4E6", padding: "8px 10px", fontSize: 12, borderRadius: 3 }}>
+                        <b>{p.name}</b><br />Potencial: {p.potencial}<br />Esforço: {p.esforco}
+                      </div>
+                    );
+                  }} />
+                <ReferenceLine x={matrixData.length ? matrixData.reduce((a, m) => a + m.potencial, 0) / matrixData.length : 0} stroke="#9A9CA2" />
+                <ReferenceLine y={matrixData.length ? matrixData.reduce((a, m) => a + m.esforco, 0) / matrixData.length : 0} stroke="#9A9CA2" />
+                <Scatter data={matrixData} fill="#856616" />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </ResearcherOnly>
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: PÚBLICOS — segmentação territorial e demográfica agregada. Nunca
-   infere atributos sensíveis de indivíduos (seção 11 e 30 do briefing).
+   VIEW: AUDIENCES
+   Nothing here comes from an official connector, so nothing here carries the
+   "official data" badge.
    ========================================================================== */
 
-const FAIXAS_ETARIAS_PADRAO = ["16–24", "25–34", "35–44", "45–59", "60+"];
-const TEMATICAS_SUGERIDAS = ["Educação", "Saúde", "Mobilidade", "Meio ambiente", "Agricultura", "Cultura", "Trabalho", "Empreendedorismo", "Juventude", "Direitos humanos", "Desenvolvimento regional"];
-
-function ViewPublicos({ cfg, update }) {
+function ViewPublicos({ cfg, update, derived }) {
   const publicos = cfg.publicos || { tematicos: [], faixas: FAIXAS_ETARIAS_PADRAO };
   const [novoTema, setNovoTema] = useState("");
+  const d = derived;
 
   const toggleTema = (tema) => {
-    const atual = publicos.tematicos.includes(tema) ? publicos.tematicos.filter((t) => t !== tema) : [...publicos.tematicos, tema];
+    const atual = publicos.tematicos.includes(tema)
+      ? publicos.tematicos.filter((t) => t !== tema)
+      : [...publicos.tematicos, tema];
     update({ publicos: { ...publicos, tematicos: atual } });
   };
+  const toggleFaixa = (faixa) => {
+    const atual = publicos.faixas.includes(faixa)
+      ? publicos.faixas.filter((f) => f !== faixa)
+      : [...publicos.faixas, faixa];
+    update({ publicos: { ...publicos, faixas: atual } });
+  };
   const addTemaCustom = () => {
-    if (novoTema.trim() && !publicos.tematicos.includes(novoTema.trim())) {
-      update({ publicos: { ...publicos, tematicos: [...publicos.tematicos, novoTema.trim()] } });
+    const t = novoTema.trim();
+    if (t && !publicos.tematicos.includes(t)) {
+      update({ publicos: { ...publicos, tematicos: [...publicos.tematicos, t] } });
       setNovoTema("");
     }
   };
@@ -1367,57 +1635,97 @@ function ViewPublicos({ cfg, update }) {
       <SectionHead eyebrow="Microsegmentação" title="Públicos"
         desc="Segmentos geográficos, demográficos agregados e temáticos — nunca perfis individuais." />
 
-      <div className="fr-alert info"><ShieldCheck size={15} /><span>Este módulo trabalha exclusivamente com agregados estatísticos e classificações voluntárias da equipe. O sistema não infere atributos sensíveis de indivíduos nem produz listas de pessoas por características pessoais.</span></div>
+      <div className="fr-alert info">
+        <ShieldCheck size={15} />
+        <span>Este módulo trabalha exclusivamente com agregados estatísticos e classificações voluntárias da equipe. O sistema não infere atributos sensíveis de indivíduos nem produz listas de pessoas por características pessoais.</span>
+      </div>
 
-      <div className="fr-grid fr-grid-2">
+      <div className="fr-grid fr-grid-3">
+        <Kpi label="Segmentos configurados" value={fmtInt(d.segmentsCount)}
+          sub="entra no Funil Reverso como 'Segmentos eleitorais'" prov={PROV.PREMISSA} />
+        <Kpi label="Faixas etárias ativas" value={fmtInt(publicos.faixas.length)} prov={PROV.PREMISSA} />
+        <Kpi label="Segmentos temáticos" value={fmtInt(publicos.tematicos.length)} prov={PROV.PREMISSA} />
+      </div>
+
+      <div className="fr-grid fr-grid-half">
         <div className="fr-card">
-          <h2 className="fr-h2">Geográficas</h2>
-          <ProvBadge type="oficial" />
-          <p className="fr-desc" style={{ marginTop: 6 }}>UF, município, zona, local, seção, urbano/rural — herdadas do módulo Territórios.</p>
+          <div className="fr-row fr-between">
+            <h2 className="fr-h2">Geográficas</h2>
+            <ProvBadge type={PROV.HISTORICO} />
+          </div>
+          <p className="fr-desc" style={{ marginTop: 6 }}>
+            Herdadas do módulo Territórios. O detalhamento até zona, local e seção depende do
+            conector do TSE, ainda não ligado — ver módulo Dados.
+          </p>
           <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: 12.5 }}>
-            <li>{getUf(cfg).name} ({getUf(cfg).regiao})</li>
-            {cfg.uf === "SP" && SP_MUNICIPIOS.filter((m) => cfg.territoriosSelecionados.includes(m.id)).map((m) => <li key={m.id}>{m.name}</li>)}
+            {d.territoriosPrioritarios.slice(0, 10).map((t) => (
+              <li key={t.id}>{t.name} — {fmtPct(t.eleitoradoShare)} do eleitorado</li>
+            ))}
           </ul>
         </div>
 
         <div className="fr-card">
-          <h2 className="fr-h2">Demográficas agregadas</h2>
-          <ProvBadge type="oficial" />
-          <p className="fr-desc" style={{ marginTop: 6 }}>Faixas etárias publicadas pelo TSE para o eleitorado da circunscrição (agregado, sem identificação individual).</p>
+          <div className="fr-row fr-between">
+            <h2 className="fr-h2">Demográficas agregadas</h2>
+            <ProvBadge type={PROV.PREMISSA} />
+          </div>
+          <p className="fr-desc" style={{ marginTop: 6 }}>
+            Faixas que a campanha decide trabalhar. Quando o conector do TSE estiver ligado, cada
+            faixa passa a carregar o eleitorado real da circunscrição — hoje é uma escolha da equipe.
+          </p>
           <div className="fr-chip-list" style={{ marginTop: 10 }}>
-            {FAIXAS_ETARIAS_PADRAO.map((f) => <span key={f} className="fr-chip on" style={{ cursor: "default" }}>{f}</span>)}
+            {FAIXAS_ETARIAS_PADRAO.map((f) => (
+              <button key={f} type="button" aria-pressed={publicos.faixas.includes(f)}
+                className={cx("fr-chip", publicos.faixas.includes(f) && "on")} onClick={() => toggleFaixa(f)}>
+                {f}
+              </button>
+            ))}
           </div>
         </div>
       </div>
 
       <div className="fr-card">
-        <h2 className="fr-h2">Temáticas</h2>
-        <ProvBadge type="premissa" />
+        <div className="fr-row fr-between">
+          <h2 className="fr-h2">Temáticas</h2>
+          <ProvBadge type={PROV.PREMISSA} />
+        </div>
         <p className="fr-desc" style={{ marginTop: 6 }}>Segmentos voluntários ou contextuais criados pela equipe (pautas, agendas, territórios de interesse).</p>
         <div className="fr-chip-list" style={{ marginTop: 10 }}>
-          {TEMATICAS_SUGERIDAS.map((t) => (
-            <button key={t} type="button" className={cx("fr-chip", publicos.tematicos.includes(t) && "on")} onClick={() => toggleTema(t)}>{t}</button>
+          {[...new Set([...TEMATICAS_SUGERIDAS, ...publicos.tematicos])].map((t) => (
+            <button key={t} type="button" aria-pressed={publicos.tematicos.includes(t)}
+              className={cx("fr-chip", publicos.tematicos.includes(t) && "on")} onClick={() => toggleTema(t)}>
+              {t}
+            </button>
           ))}
         </div>
-        <div className="fr-row" style={{ marginTop: 12, maxWidth: 360 }}>
-          <input type="text" placeholder="Novo segmento temático" value={novoTema} onChange={(e) => setNovoTema(e.target.value)}
-            style={{ fontFamily: "var(--font-sans)", padding: "7px 9px", border: "1px solid var(--line)", borderRadius: 3, flex: 1, fontSize: 12.5 }} />
-          <button className="fr-btn sm" onClick={addTemaCustom}><Plus size={13} /> Adicionar</button>
+        <div className="fr-row" style={{ marginTop: 12, maxWidth: 380 }}>
+          <input type="text" className="fr-input text" placeholder="Novo segmento temático"
+            aria-label="Novo segmento temático" value={novoTema}
+            onChange={(e) => setNovoTema(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") addTemaCustom(); }} />
+          <button className="fr-btn sm" onClick={addTemaCustom} disabled={!novoTema.trim()}
+            title={novoTema.trim() ? undefined : "Escreva o nome do segmento primeiro"}>
+            <Plus size={13} /> Adicionar
+          </button>
         </div>
       </div>
 
       <div className="fr-card">
-        <h2 className="fr-h2">Socioeconômicas (integração futura)</h2>
-        <p className="fr-desc">Renda agregada, infraestrutura, mobilidade e indicadores sociais/ambientais — via IBGE/Censo. Não conectado nesta demonstração; ver módulo Dados.</p>
+        <div className="fr-row fr-between">
+          <h2 className="fr-h2">Socioeconômicas</h2>
+          <span className="fr-badge perigo"><span className="dot" />Não conectado</span>
+        </div>
+        <p className="fr-desc">Renda agregada, infraestrutura, mobilidade e indicadores sociais/ambientais — via IBGE/Censo. Não conectado nesta versão; ver módulo Dados.</p>
       </div>
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: CANAIS — cada canal com cadeia própria, matriz canal × conversão,
-   e o multiplicador de rede (dobras de funil, seções 9, 10, 12).
+   VIEW: CHANNELS
    ========================================================================== */
+
+const ICONS = { Handshake, UsersRound, Footprints, DoorOpen, PartyPopper, Smartphone, MessageSquare };
 
 function ViewCanais({ cfg, update, derived }) {
   const d = derived;
@@ -1425,64 +1733,110 @@ function ViewCanais({ cfg, update, derived }) {
   const setChannelParam = (id, key, v) => setChannel(id, { params: { ...cfg.channels[id].params, [key]: v } });
   const setNetwork = (patch) => update({ network: { ...cfg.network, ...patch } });
 
+  const normalizarShares = () => {
+    const ativos = CHANNEL_DEFS.filter((def) => cfg.channels[def.id].enabled);
+    const total = ativos.reduce((a, def) => a + cfg.channels[def.id].share, 0);
+    if (!total) return;
+    const next = { ...cfg.channels };
+    ativos.forEach((def) => {
+      next[def.id] = { ...next[def.id], share: Math.round((next[def.id].share / total) * 100) / 100 };
+    });
+    update({ channels: next });
+  };
+
   return (
     <div className="fr-stack">
       <SectionHead eyebrow="Funil de conversão" title="Canais"
         desc="Cada canal tem cadeia, conversão e unidade operacional próprias — nunca uma taxa média única para todos." />
 
-      <div className="fr-alert info"><Info size={15} /><span>Por padrão, 100% da meta ajustada está alocada ao corpo a corpo (15% de conversão) — reproduzindo exatamente o exemplo obrigatório do briefing. Redistribua a participação entre os canais abaixo para diversificar o funil; é essa diversificação, e não uma taxa média única, que o modelo recomenda para reduzir o risco de depender de um único canal.</span></div>
+      <div className="fr-alert info">
+        <Info size={15} />
+        <span>Por padrão, 100% da meta ajustada está alocada ao corpo a corpo (15% de conversão), reproduzindo o exemplo de referência. Redistribua a participação entre os canais para diversificar o funil e reduzir a dependência de um único canal.</span>
+      </div>
 
       <div className="fr-card">
-        <h2 className="fr-h2">Matriz canal × conversão</h2>
+        <div className="fr-row fr-between fr-row-wrap">
+          <h2 className="fr-h2">Matriz canal × conversão</h2>
+          <button className="fr-btn sm" onClick={normalizarShares} disabled={Math.abs(d.enabledShareSum - 1) < 0.005}>
+            <RefreshCw size={12} /> Normalizar participações
+          </button>
+        </div>
         <div className="fr-scroll-x" style={{ marginTop: 10 }}>
           <table className="fr-table">
-            <thead><tr><th>Canal</th><th className="num">Participação na meta</th><th className="num">Conversão (contato→apoio)</th><th className="num">Contatos necessários</th><th className="num">Unidade operacional necessária</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Canal</th>
+                <th className="num">Participação na meta</th>
+                <th className="num">Conversão (contato→apoio)</th>
+                <th className="num">Multiplicador da cadeia</th>
+                <th className="num">Contatos necessários</th>
+                <th className="num">Unidade operacional</th>
+              </tr>
+            </thead>
             <tbody>
               {d.channelResults.map((c) => (
-                <tr key={c.id} style={{ opacity: c.enabled ? 1 : 0.4 }}>
-                  <td>{c.label}</td>
+                <tr key={c.id} style={{ opacity: c.enabled ? 1 : 0.45 }}>
+                  <td>{c.label}{!c.enabled && <span className="fr-hint"> (inativo)</span>}</td>
                   <td className="num">{fmtPct(c.share)}</td>
                   <td className="num">{fmtPct(c.conversion)}</td>
+                  <td className="num">{fmtDec(c.chainMultiplier, 2)}</td>
                   <td className="num" style={{ fontWeight: 700 }}>{fmtInt(c.contactsNeeded)}</td>
                   <td className="num">{fmtInt(c.actionsNeeded)} {c.unit}</td>
                 </tr>
               ))}
-              <tr><td style={{ fontWeight: 700 }}>Total</td><td className="num fr-num">{fmtPct(d.enabledShareSum)}</td><td /><td className="num fr-num" style={{ fontWeight: 700 }}>{fmtInt(d.totalContactsNeeded)}</td><td /></tr>
             </tbody>
+            <tfoot>
+              <tr>
+                <td>Total (canais ativos)</td>
+                <td className="num" style={{ color: Math.abs(d.enabledShareSum - 1) > 0.01 ? "var(--danger-ink)" : undefined }}>
+                  {fmtPct(d.enabledShareSum)}
+                </td>
+                <td /><td />
+                <td className="num">{fmtInt(d.totalContactsNeeded)}</td>
+                <td className="num">{fmtInt(d.totalActions)}</td>
+              </tr>
+            </tfoot>
           </table>
         </div>
-        {Math.abs(d.enabledShareSum - 1) > 0.01 && <p className="fr-hint" style={{ marginTop: 8, color: "var(--premissa)" }}>A soma das participações deveria fechar em 100%.</p>}
+        {Math.abs(d.enabledShareSum - 1) > 0.01 && (
+          <p className="fr-field-error" style={{ marginTop: 8 }}>
+            A soma das participações dos canais ativos deveria fechar em 100%.
+          </p>
+        )}
       </div>
 
-      <div className="fr-grid fr-grid-2">
+      <div className="fr-grid fr-grid-half">
         {CHANNEL_DEFS.map((def) => {
           const st = cfg.channels[def.id];
           const res = d.channelResults.find((c) => c.id === def.id);
           const Icon = ICONS[def.icon] || Radio;
           return (
             <div key={def.id} className="fr-card">
-              <div className="fr-row" style={{ justifyContent: "space-between" }}>
+              <div className="fr-row fr-between">
                 <div className="fr-row" style={{ fontWeight: 700, fontSize: 13 }}><Icon size={15} /> {def.label}</div>
-                <label className="fr-row" style={{ fontSize: 11, gap: 5 }}>
-                  <input type="checkbox" checked={st.enabled} onChange={(e) => setChannel(def.id, { enabled: e.target.checked })} /> ativo
+                <label className="fr-row" style={{ fontSize: 12, gap: 5 }}>
+                  <input type="checkbox" checked={st.enabled}
+                    onChange={(e) => setChannel(def.id, { enabled: e.target.checked })} /> ativo
                 </label>
               </div>
               <div className="fr-stack" style={{ marginTop: 10, gap: 10 }}>
-                <SliderField label="Participação na meta ajustada" value={st.share} onChange={(v) => setChannel(def.id, { share: v })} min={0} max={1} step={0.01} />
-                <SliderField label="Conversão (contato → apoio declarado)" value={st.conversion} onChange={(v) => setChannel(def.id, { conversion: v })} min={0} max={1} step={0.01} />
-                {def.fields.map((f) => (
-                  f.pct
-                    ? <SliderField key={f.key} label={f.label} value={st.params[f.key]} onChange={(v) => setChannelParam(def.id, f.key, v)} min={f.min} max={f.max} step={f.step} />
-                    : <NumberField key={f.key} label={f.label} value={st.params[f.key]} onChange={(v) => setChannelParam(def.id, f.key, v)} min={f.min} max={f.max} step={f.step} />
-                ))}
+                <SliderField label="Participação na meta ajustada" value={st.share}
+                  onChange={(v) => setChannel(def.id, { share: v })} min={0} max={1} step={0.01} />
+                <SliderField label="Conversão (contato → apoio declarado)" value={st.conversion}
+                  onChange={(v) => setChannel(def.id, { conversion: v })} min={0} max={1} step={0.01} />
+                <ResearcherOnly>
+                  {def.fields.map((f) => (
+                    f.pct
+                      ? <SliderField key={f.key} label={f.label} value={st.params[f.key]}
+                          onChange={(v) => setChannelParam(def.id, f.key, v)} min={f.min} max={f.max} step={f.step} />
+                      : <NumberField key={f.key} label={f.label} value={st.params[f.key]}
+                          onChange={(v) => setChannelParam(def.id, f.key, v)} min={f.min} max={f.max} step={f.step} />
+                  ))}
+                </ResearcherOnly>
               </div>
               <div className="fr-divider" />
-              <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
-                <span>Contatos necessários</span><b className="fr-num">{fmtInt(res?.contactsNeeded)}</b>
-              </div>
-              <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
-                <span>{def.unit} necessári{def.unit.endsWith("s") ? "as" : "os"}</span><b className="fr-num">{fmtInt(res?.actionsNeeded)}</b>
-              </div>
+              <div className="fr-line"><span>Contatos necessários</span><b className="fr-num">{fmtInt(res?.contactsNeeded)}</b></div>
+              <div className="fr-line"><span>{def.unit}</span><b className="fr-num">{fmtInt(res?.actionsNeeded)}</b></div>
             </div>
           );
         })}
@@ -1492,66 +1846,98 @@ function ViewCanais({ cfg, update, derived }) {
         <h2 className="fr-h2">Multiplicador de rede — dobras do funil</h2>
         <p className="fr-desc">NOVOS_CONTATOS = REDE_BRUTA × TAXA_ATIVAÇÃO × (1 − TAXA_SOBREPOSIÇÃO), aplicado em camadas.</p>
         <div className="fr-grid fr-grid-4" style={{ marginTop: 12 }}>
-          <NumberField label="Lideranças na base" value={cfg.network.numLiderancas} onChange={(v) => setNetwork({ numLiderancas: v })} min={0} step={10} prov="premissa" />
-          <NumberField label="Contatos potenciais por camada (fanout)" value={cfg.network.fanout} onChange={(v) => setNetwork({ fanout: v })} min={1} max={100} step={1} prov="premissa" />
+          <NumberField label="Lideranças na base" value={cfg.network.numLiderancas}
+            onChange={(v) => setNetwork({ numLiderancas: v })} min={0} step={10} prov={PROV.PREMISSA} />
+          <NumberField label="Contatos por camada (fanout)" value={cfg.network.fanout}
+            onChange={(v) => setNetwork({ fanout: v })} min={1} max={100} step={1} prov={PROV.PREMISSA} />
           <SliderField label="Taxa de ativação" value={cfg.network.taxaAtivacao} onChange={(v) => setNetwork({ taxaAtivacao: v })} />
           <SliderField label="Taxa de sobreposição" value={cfg.network.taxaSobreposicao} onChange={(v) => setNetwork({ taxaSobreposicao: v })} />
         </div>
-        <div style={{ marginTop: 16 }}>
-          <NetworkTree trail={d.networkTrail} />
-        </div>
-        <p className="fr-hint" style={{ marginTop: 8 }}>Alcance final estimado após {cfg.network.camadas} camada(s): <b className="fr-num">{fmtInt(d.networkFinalReach)}</b> pessoas — compare com os contatos necessários do canal "Lideranças / rede organizada" acima.</p>
+        <div style={{ marginTop: 16 }}><NetworkTree trail={d.networkTrail} /></div>
+        <p className="fr-hint" style={{ marginTop: 8 }}>
+          Alcance final estimado após {cfg.network.camadas} camada(s): <b className="fr-num">{fmtInt(d.networkFinalReach)}</b> pessoas —
+          compare com os contatos necessários do canal "Lideranças / rede organizada" acima.
+        </p>
       </div>
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: EQUIPES — capacidade operacional diária × demanda (seção 18).
+   VIEW: TEAMS
    ========================================================================== */
 
 function ViewEquipes({ cfg, update, derived }) {
   const d = derived;
   const setTeam = (patch) => update({ team: { ...cfg.team, ...patch } });
   const statusLabel = { insuficiente: "Capacidade insuficiente", suficiente: "Capacidade suficiente", excedente: "Excesso de capacidade", sem_demanda: "Sem demanda calculada" };
-  const statusColor = { insuficiente: "var(--danger)", suficiente: "var(--oficial)", excedente: "var(--estimativa)", sem_demanda: "var(--text-faint)" };
+  const statusColor = { insuficiente: "var(--danger-ink)", suficiente: "var(--oficial-ink)", excedente: "var(--estimativa-ink)", sem_demanda: "var(--text-faint)" };
+
+  const mobilizadoresNecessarios = Math.ceil(safeDiv(
+    d.dailyContacts - ((cfg.team.reunioesDia || 0) * (cfg.team.contatosPorReuniao || 0) + (cfg.team.eventosDia || 0) * (cfg.team.contatosPorEvento || 0)),
+    (cfg.team.horasDia || 0) * (cfg.team.contatosHora || 0),
+  ));
 
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Estrutura" title="Equipes" desc="Capacidade operacional diária comparada à demanda gerada pelo funil." />
+      <SectionHead eyebrow="Estrutura" title="Equipes"
+        desc="Capacidade operacional diária e acumulada, comparada à demanda gerada pelo funil." />
 
-      <div className="fr-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <div className="fr-grid fr-grid-half">
         <div className="fr-card">
           <h2 className="fr-h2">Entradas de capacidade</h2>
-          <ProvBadge type="premissa" />
+          <ProvBadge type={PROV.PREMISSA} />
           <div className="fr-grid fr-grid-2" style={{ marginTop: 12 }}>
             <NumberField label="Coordenadores" value={cfg.team.coordenadores} onChange={(v) => setTeam({ coordenadores: v })} min={0} step={1} />
             <NumberField label="Mobilizadores" value={cfg.team.mobilizadores} onChange={(v) => setTeam({ mobilizadores: v })} min={0} step={1} />
             <NumberField label="Horas disponíveis / dia" value={cfg.team.horasDia} onChange={(v) => setTeam({ horasDia: v })} min={0} max={16} step={0.5} />
             <NumberField label="Contatos / hora / mobilizador" value={cfg.team.contatosHora} onChange={(v) => setTeam({ contatosHora: v })} min={0} step={0.5} />
-            <NumberField label="Reuniões / dia (capacidade)" value={cfg.team.reunioesDia} onChange={(v) => setTeam({ reunioesDia: v })} min={0} step={1} />
-            <NumberField label="Contatos / reunião (capacidade)" value={cfg.team.contatosPorReuniao} onChange={(v) => setTeam({ contatosPorReuniao: v })} min={0} step={1} />
-            <NumberField label="Eventos / dia (capacidade)" value={cfg.team.eventosDia} onChange={(v) => setTeam({ eventosDia: v })} min={0} step={0.1} />
-            <NumberField label="Contatos / evento (capacidade)" value={cfg.team.contatosPorEvento} onChange={(v) => setTeam({ contatosPorEvento: v })} min={0} step={10} />
+            <NumberField label="Reuniões / dia" value={cfg.team.reunioesDia} onChange={(v) => setTeam({ reunioesDia: v })} min={0} step={1} />
+            <NumberField label="Contatos / reunião" value={cfg.team.contatosPorReuniao} onChange={(v) => setTeam({ contatosPorReuniao: v })} min={0} step={1} />
+            <NumberField label="Eventos / dia" value={cfg.team.eventosDia} onChange={(v) => setTeam({ eventosDia: v })} min={0} step={0.1} />
+            <NumberField label="Contatos / evento" value={cfg.team.contatosPorEvento} onChange={(v) => setTeam({ contatosPorEvento: v })} min={0} step={10} />
           </div>
+          {isFiniteNum(mobilizadoresNecessarios) && mobilizadoresNecessarios > 0 && (
+            <p className="fr-hint" style={{ marginTop: 12 }}>
+              Para fechar a meta diária apenas com corpo a corpo seriam necessários{" "}
+              <b className="fr-num">{fmtInt(mobilizadoresNecessarios)}</b> mobilizadores nas condições acima.
+            </p>
+          )}
         </div>
 
         <div className="fr-stack">
           <div className="fr-card">
-            <h2 className="fr-h2">Capacidade operacional diária</h2>
+            <h2 className="fr-h2">Capacidade diária</h2>
             <div className="fr-kpi-value" style={{ fontSize: 30, marginTop: 6 }}>{fmtInt(d.dailyCapacity)}</div>
-            <p className="fr-desc">vs. demanda operacional diária de <b className="fr-num">{fmtInt(d.dailyContacts)}</b> contatos</p>
-            <div className="fr-row" style={{ marginTop: 10, gap: 6 }}>
+            <p className="fr-desc">vs. demanda diária de <b className="fr-num">{fmtInt(d.dailyContacts)}</b> contatos</p>
+            <div className="fr-row" style={{ marginTop: 10 }}>
               <span className="fr-badge" style={{ background: "transparent", border: `1px solid ${statusColor[d.capacityStatus]}`, color: statusColor[d.capacityStatus] }}>
                 {d.capacityStatus === "insuficiente" ? <AlertTriangle size={12} /> : <CheckCircle2 size={12} />} {statusLabel[d.capacityStatus]}
               </span>
             </div>
             <div className="fr-divider" />
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Gap diário</span><b className="fr-num" style={{ color: d.capacityGap < 0 ? "var(--danger)" : "var(--oficial)" }}>{d.capacityGap >= 0 ? "+" : ""}{fmtInt(d.capacityGap)}</b></div>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Meta por equipe (coordenação)</span><b className="fr-num">{fmtInt(d.metaPorEquipe)}</b></div>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Meta por mobilizador / dia</span><b className="fr-num">{fmtInt(d.metaPorMobilizador)}</b></div>
+            <div className="fr-line"><span>Gap diário</span>
+              <b className="fr-num" style={{ color: d.capacityGap < 0 ? "var(--danger-ink)" : "var(--oficial-ink)" }}>{fmtSigned(d.capacityGap)}</b>
+            </div>
+            <div className="fr-line"><span>Meta por equipe (coordenação)</span><b className="fr-num">{fmtInt(d.metaPorEquipe)}</b></div>
+            <div className="fr-line"><span>Meta por mobilizador / dia</span><b className="fr-num">{fmtInt(d.metaPorMobilizador)}</b></div>
           </div>
-          <Formula title="Como a capacidade é calculada" formula={"CAPACIDADE_DIÁRIA =\n  MOBILIZADORES × HORAS_DIA × CONTATOS_HORA\n+ REUNIÕES_DIA × CONTATOS_POR_REUNIÃO\n+ EVENTOS_DIA × CONTATOS_POR_EVENTO"} />
+
+          <div className="fr-card">
+            <h2 className="fr-h2">Capacidade acumulada no período</h2>
+            <p className="fr-desc">
+              Usa os dias por frente declarados na Agenda ({fmtInt(cfg.agenda.diasRua)} dias de rua,
+              {" "}{fmtInt(cfg.agenda.diasEventos)} dias de eventos).
+            </p>
+            <div className="fr-line" style={{ marginTop: 10 }}><span>Capacidade total</span><b className="fr-num">{fmtInt(d.campaignCapacity)}</b></div>
+            <div className="fr-line"><span>Contatos exigidos</span><b className="fr-num">{fmtInt(d.totalContactsNeeded)}</b></div>
+            <div className="fr-line"><span>Gap do período</span>
+              <b className="fr-num" style={{ color: d.campaignCapacityGap < 0 ? "var(--danger-ink)" : "var(--oficial-ink)" }}>{fmtSigned(d.campaignCapacityGap)}</b>
+            </div>
+          </div>
+
+          <Formula title="Como a capacidade é calculada"
+            formula={"CAPACIDADE_DIÁRIA =\n  MOBILIZADORES × HORAS_DIA × CONTATOS_HORA\n+ REUNIÕES_DIA × CONTATOS_POR_REUNIÃO\n+ EVENTOS_DIA × CONTATOS_POR_EVENTO\n\nCAPACIDADE_DO_PERÍODO =\n  (MOBILIZADORES × HORAS_DIA × CONTATOS_HORA + REUNIÕES_DIA × CONTATOS_POR_REUNIÃO) × DIAS_DE_RUA\n+ EVENTOS_DIA × CONTATOS_POR_EVENTO × DIAS_DE_EVENTOS"} />
         </div>
       </div>
     </div>
@@ -1559,92 +1945,175 @@ function ViewEquipes({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: AGENDA — planejamento temporal (seção 17).
+   VIEW: SCHEDULE — street / digital / event days feed accumulated capacity
+   and the budget.
    ========================================================================== */
 
 function ViewAgenda({ cfg, update, derived }) {
   const d = derived;
   const setAgenda = (patch) => update({ agenda: { ...cfg.agenda, ...patch } });
-  const inicio = new Date(cfg.agenda.dataInicio);
-  const fim = new Date(cfg.agenda.dataFim);
-  const diasCorridos = Math.max(0, Math.round((fim - inicio) / 86400000));
-  const diasAtivosCalc = Math.max(0, diasCorridos - cfg.agenda.diasDescanso);
+  const datasInvalidas = daysBetween(cfg.agenda.dataInicio, cfg.agenda.dataFim) === 0;
 
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Tempo" title="Agenda" desc="Datas, dias ativos por frente e metas diária/semanal/por equipe/por mobilizador." />
-      <div className="fr-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <SectionHead eyebrow="Tempo" title="Agenda"
+        desc="Datas, dias ativos por frente e metas diária, semanal, por equipe e por mobilizador." />
+
+      <div className="fr-grid fr-grid-half">
         <div className="fr-card">
           <h2 className="fr-h2">Janela de campanha</h2>
-          <ProvBadge type="premissa" />
+          <ProvBadge type={PROV.PREMISSA} />
           <div className="fr-grid fr-grid-2" style={{ marginTop: 12 }}>
-            <div className="fr-field"><div className="fr-field-label"><span>Data inicial</span></div><input type="date" value={cfg.agenda.dataInicio} onChange={(e) => setAgenda({ dataInicio: e.target.value })} /></div>
-            <div className="fr-field"><div className="fr-field-label"><span>Data final</span></div><input type="date" value={cfg.agenda.dataFim} onChange={(e) => setAgenda({ dataFim: e.target.value })} /></div>
-            <NumberField label="Dias de rua" value={cfg.agenda.diasRua} onChange={(v) => setAgenda({ diasRua: v })} min={0} />
-            <NumberField label="Dias digitais" value={cfg.agenda.diasDigitais} onChange={(v) => setAgenda({ diasDigitais: v })} min={0} />
-            <NumberField label="Dias de eventos" value={cfg.agenda.diasEventos} onChange={(v) => setAgenda({ diasEventos: v })} min={0} />
-            <NumberField label="Dias de descanso" value={cfg.agenda.diasDescanso} onChange={(v) => setAgenda({ diasDescanso: v })} min={0} />
+            <div className="fr-field">
+              <label className="fr-field-label" htmlFor="dt-ini"><span>Data inicial</span></label>
+              <input id="dt-ini" type="date" value={cfg.agenda.dataInicio} onChange={(e) => setAgenda({ dataInicio: e.target.value })} />
+            </div>
+            <div className="fr-field">
+              <label className="fr-field-label" htmlFor="dt-fim"><span>Data final</span></label>
+              <input id="dt-fim" type="date" value={cfg.agenda.dataFim} onChange={(e) => setAgenda({ dataFim: e.target.value })} />
+            </div>
+            <NumberField label="Dias de rua" value={cfg.agenda.diasRua} onChange={(v) => setAgenda({ diasRua: v })} min={0} max={365}
+              hint="Dias em que corpo a corpo e reuniões operam" />
+            <NumberField label="Dias de eventos" value={cfg.agenda.diasEventos} onChange={(v) => setAgenda({ diasEventos: v })} min={0} max={365}
+              hint="Multiplica eventos/dia no orçamento e na capacidade" />
+            <NumberField label="Dias digitais" value={cfg.agenda.diasDigitais} onChange={(v) => setAgenda({ diasDigitais: v })} min={0} max={365}
+              hint="Referência de planejamento do canal digital" />
+            <NumberField label="Dias de descanso" value={cfg.agenda.diasDescanso} onChange={(v) => setAgenda({ diasDescanso: v })} min={0} max={365} />
           </div>
+          {datasInvalidas && <p className="fr-field-error" style={{ marginTop: 8 }}>A data final precisa ser posterior à inicial.</p>}
           <div className="fr-divider" />
-          <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Dias corridos no período</span><b className="fr-num">{fmtInt(diasCorridos)}</b></div>
-          <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Dias ativos calculados</span><b className="fr-num">{fmtInt(diasAtivosCalc)}</b></div>
-          <button className="fr-btn sm" style={{ marginTop: 10 }} onClick={() => update({ campaignDays: diasAtivosCalc })}><RefreshCw size={12} /> Usar {fmtInt(diasAtivosCalc)} como dias de campanha</button>
-          <p className="fr-hint" style={{ marginTop: 8 }}>"Dias de campanha operacional" (usado no Funil Reverso) é hoje <b className="fr-num">{fmtInt(cfg.campaignDays)}</b>.</p>
+          <div className="fr-line"><span>Dias corridos no período</span><b className="fr-num">{fmtInt(d.diasCorridos)}</b></div>
+          <div className="fr-line"><span>Dias ativos calculados</span><b className="fr-num">{fmtInt(d.diasAtivosAgenda)}</b></div>
+          <div className="fr-line"><span>Dias restantes até o fim</span><b className="fr-num">{fmtInt(d.diasRestantes)}</b></div>
+          <button className="fr-btn sm" style={{ marginTop: 10 }}
+            disabled={d.diasAtivosAgenda === cfg.campaignDays || d.diasAtivosAgenda <= 0}
+            onClick={() => update({ campaignDays: d.diasAtivosAgenda })}>
+            <RefreshCw size={12} /> Usar {fmtInt(d.diasAtivosAgenda)} como dias de campanha
+          </button>
+          <p className="fr-hint" style={{ marginTop: 8 }}>
+            "Dias de campanha operacional" (usado no Funil Reverso) é hoje <b className="fr-num">{fmtInt(cfg.campaignDays)}</b>.
+          </p>
         </div>
 
         <div className="fr-stack">
           <div className="fr-card">
             <h2 className="fr-h2">Metas derivadas</h2>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5, marginTop: 8 }}><span>Meta diária</span><b className="fr-num">{fmtInt(d.dailyContacts)}</b></div>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Meta semanal</span><b className="fr-num">{fmtInt(d.weeklyContacts)}</b></div>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Meta por equipe (coordenação)</span><b className="fr-num">{fmtInt(d.metaPorEquipe)}</b></div>
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}><span>Meta por mobilizador / dia</span><b className="fr-num">{fmtInt(d.metaPorMobilizador)}</b></div>
+            <div className="fr-line" style={{ marginTop: 8 }}><span>Meta diária</span><b className="fr-num">{fmtInt(d.dailyContacts)}</b></div>
+            <div className="fr-line"><span>Meta semanal</span><b className="fr-num">{fmtInt(d.weeklyContacts)}</b></div>
+            <div className="fr-line"><span>Meta por equipe (coordenação)</span><b className="fr-num">{fmtInt(d.metaPorEquipe)}</b></div>
+            <div className="fr-line"><span>Meta por mobilizador / dia</span><b className="fr-num">{fmtInt(d.metaPorMobilizador)}</b></div>
+            <div className="fr-divider" />
+            <div className="fr-line"><span>Eventos no período</span><b className="fr-num">{fmtDec(d.eventosTotal, 1)}</b></div>
+            <div className="fr-line"><span>Capacidade acumulada</span><b className="fr-num">{fmtInt(d.campaignCapacity)}</b></div>
           </div>
-          <div className="fr-card">
-            <h2 className="fr-h2">Referência do calendário eleitoral 2026</h2>
-            <ProvBadge type="oficial" />
-            <p className="fr-desc" style={{ marginTop: 6 }}>1º turno: 4 de outubro de 2026 · 2º turno (se houver): 25 de outubro de 2026. Confirme sempre no site do TSE, pois prazos podem sofrer resoluções específicas por pleito.</p>
-          </div>
+          <CalendarioEleitoral cfg={cfg} update={update} derived={d} />
         </div>
       </div>
     </div>
   );
 }
 
+/** Dates derived from the election year. */
+function CalendarioEleitoral({ cfg, update, derived }) {
+  const datas = electionDates(cfg.eleicaoAno);
+  const fmtData = (iso) => (iso ? new Date(`${iso}T12:00:00Z`).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }) : "—");
+  const desalinhado = datas && cfg.agenda.dataFim !== datas.primeiroTurno;
+  return (
+    <div className="fr-card">
+      <div className="fr-row fr-between">
+        <h2 className="fr-h2">Calendário eleitoral {cfg.eleicaoAno}</h2>
+        <ProvBadge type={PROV.OFICIAL} />
+      </div>
+      <p className="fr-desc" style={{ marginTop: 6 }}>
+        A Lei 9.504/1997, art. 1º, fixa o 1º turno no primeiro domingo de outubro e o 2º turno no
+        último domingo de outubro. As datas abaixo são calculadas a partir do ano selecionado na
+        barra de contexto — confirme sempre as resoluções específicas do pleito no site do TSE.
+      </p>
+      <div className="fr-line" style={{ marginTop: 10 }}><span>1º turno</span><b className="fr-num">{fmtData(datas?.primeiroTurno)}</b></div>
+      <div className="fr-line"><span>2º turno (se houver)</span><b className="fr-num">{fmtData(datas?.segundoTurno)}</b></div>
+      {desalinhado && (
+        <>
+          <div className="fr-divider" />
+          <p className="fr-hint">
+            A data final da campanha ({cfg.agenda.dataFim}) não coincide com o 1º turno de {cfg.eleicaoAno}.
+          </p>
+          <button className="fr-btn sm" style={{ marginTop: 8 }}
+            onClick={() => update({ agenda: { ...cfg.agenda, dataFim: datas.primeiroTurno } })}>
+            <RefreshCw size={12} /> Usar {fmtData(datas.primeiroTurno)} como data final
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ============================================================================
-   VIEW: ORÇAMENTO — custo por contato/apoio/território (seção 19).
+   VIEW: BUDGET
    ========================================================================== */
 
 function ViewOrcamento({ cfg, update, derived }) {
   const d = derived;
   const setBudget = (patch) => update({ budget: { ...cfg.budget, ...patch } });
-  const gapColor = d.budgetGap >= 0 ? "var(--oficial)" : "var(--danger)";
+  const custoContatos = isFiniteNum(d.totalContactsNeeded) ? d.totalContactsNeeded * cfg.budget.custoPorContato : Infinity;
+  const custoEventos = d.eventosTotal * cfg.budget.custoPorEvento;
+  const custoLogistico = cfg.campaignDays * cfg.budget.custoLogisticoDia;
+  const composicao = [
+    { nome: "Contatos", valor: custoContatos },
+    { nome: "Eventos", valor: custoEventos },
+    { nome: "Logística", valor: custoLogistico },
+  ];
+
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Recursos" title="Orçamento" desc="Custo estimado do plano — nunca apresentado como garantia de resultado." />
-      <div className="fr-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <SectionHead eyebrow="Recursos" title="Orçamento"
+        desc="Custo estimado do plano — nunca apresentado como garantia de resultado." />
+
+      <div className="fr-grid fr-grid-half">
         <div className="fr-card">
           <h2 className="fr-h2">Premissas de custo</h2>
-          <ProvBadge type="premissa" />
+          <ProvBadge type={PROV.PREMISSA} />
           <div className="fr-grid fr-grid-2" style={{ marginTop: 12 }}>
             <NumberField label="Custo por contato (R$)" value={cfg.budget.custoPorContato} onChange={(v) => setBudget({ custoPorContato: v })} min={0} step={0.05} />
             <NumberField label="Custo por evento (R$)" value={cfg.budget.custoPorEvento} onChange={(v) => setBudget({ custoPorEvento: v })} min={0} step={100} />
             <NumberField label="Custo logístico / dia (R$)" value={cfg.budget.custoLogisticoDia} onChange={(v) => setBudget({ custoLogisticoDia: v })} min={0} step={50} />
             <NumberField label="Orçamento total disponível (R$)" value={cfg.budget.orcamentoTotal} onChange={(v) => setBudget({ orcamentoTotal: v })} min={0} step={1000} />
           </div>
+          <div className="fr-divider" />
+          <h2 className="fr-h2" style={{ fontSize: 13 }}>Composição do custo</h2>
+          <div style={{ marginTop: 8 }}>
+            {composicao.map((c) => (
+              <div key={c.nome} className="fr-line"><span>{c.nome}</span><b className="fr-num">{fmtMoney(c.valor)}</b></div>
+            ))}
+          </div>
+          <p className="fr-hint" style={{ marginTop: 8 }}>
+            Eventos = eventos/dia ({fmtDec(cfg.team.eventosDia, 1)}) × dias de eventos ({fmtInt(cfg.agenda.diasEventos)}), vindos de Equipes e Agenda.
+          </p>
         </div>
+
         <div className="fr-stack">
           <div className="fr-grid fr-grid-2">
-            <Kpi label="Custo total estimado" value={fmtMoney(d.totalCost)} prov="estimativa" />
-            <Kpi label="Custo por apoio" value={fmtMoney(d.costPerSupport)} prov="estimativa" />
+            <Kpi label="Custo total estimado" value={fmtMoney(d.totalCost)} tone={d.budgetGap < 0 ? "danger" : undefined} prov={PROV.ESTIMATIVA} />
+            <Kpi label="Custo por apoio" value={fmtMoney(d.costPerSupport)} prov={PROV.ESTIMATIVA} />
           </div>
           <div className="fr-card">
-            <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 13 }}>
+            <div className="fr-line" style={{ fontSize: 13 }}>
               <span>Saldo vs. orçamento disponível</span>
-              <b className="fr-num" style={{ color: gapColor }}>{d.budgetGap >= 0 ? "+" : ""}{fmtMoney(d.budgetGap)}</b>
+              <b className="fr-num" style={{ color: d.budgetGap >= 0 ? "var(--oficial-ink)" : "var(--danger-ink)" }}>
+                {fmtSigned(d.budgetGap, fmtMoney)}
+              </b>
             </div>
+            <div className="fr-progress-track" style={{ marginTop: 10 }}>
+              <div className="fr-progress-fill" style={{
+                width: `${Math.min(100, clamp01(safeDiv(d.totalCost, cfg.budget.orcamentoTotal)) * 100)}%`,
+                background: d.budgetGap < 0 ? "var(--danger)" : "var(--oficial)",
+              }} />
+            </div>
+            <p className="fr-hint" style={{ marginTop: 6 }}>
+              O plano consome {fmtPct(safeDiv(d.totalCost, cfg.budget.orcamentoTotal))} do orçamento declarado.
+            </p>
           </div>
-          <Formula title="Como o custo total é calculado" formula={"CUSTO_TOTAL =\n  CONTATOS_NECESSÁRIOS × CUSTO_POR_CONTATO\n+ EVENTOS_TOTAIS × CUSTO_POR_EVENTO\n+ DIAS_ATIVOS × CUSTO_LOGÍSTICO_DIA\n\nCUSTO_POR_APOIO = CUSTO_TOTAL / META_AJUSTADA"} />
+          <Formula title="Como o custo total é calculado"
+            formula={"CUSTO_TOTAL =\n  CONTATOS_NECESSÁRIOS × CUSTO_POR_CONTATO\n+ EVENTOS_DO_PERÍODO × CUSTO_POR_EVENTO\n+ DIAS_ATIVOS × CUSTO_LOGÍSTICO_DIA\n\nEVENTOS_DO_PERÍODO = EVENTOS_POR_DIA × DIAS_DE_EVENTOS (Agenda)\n\nCUSTO_POR_APOIO = CUSTO_TOTAL / META_AJUSTADA"} />
         </div>
       </div>
     </div>
@@ -1652,46 +2121,98 @@ function ViewOrcamento({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: CENÁRIOS — quatro modelos padrão + cenários personalizados (seção 24).
+   VIEW: SCENARIOS
    ========================================================================== */
 
-function computeScenarioSummary(cfg, presetOrCustom) {
-  const scenario = scenarioEngine.apply(cfg.abstentionRate, cfg.fidelityRate, presetOrCustom);
-  const turnout = electorateEngine.turnoutFromAbstention(scenario.abstentionRate);
-  const adjustedGoal = funnelEngine.adjustedGoal(cfg.voteGoal, scenario.fidelityRate, turnout);
-  let totalContacts = 0;
-  CHANNEL_DEFS.forEach((def) => {
-    const st = cfg.channels[def.id];
-    if (!st.enabled) return;
-    const conv = clamp01(st.conversion * scenario.conversionMultiplier);
-    totalContacts += funnelEngine.contactsForGoalShare(adjustedGoal, st.share, conv);
-  });
-  const capacity = capacityEngine.dailyCapacity(cfg.team) * (scenario.capacityMultiplier || 1);
-  const dailyContacts = funnelEngine.dailyTarget(totalContacts, cfg.campaignDays);
-  return { adjustedGoal, totalContacts, dailyContacts, capacity, gap: capacity - dailyContacts };
+/** What the active scenario produces, and how far it moves the assumption. */
+function DeltaCenario({ rotulo, base, valor, pct = false, multiplicador = false }) {
+  const delta = valor - base;
+  const neutro = Math.abs(delta) < 1e-9;
+  const fmt = pct ? fmtPct : (v) => `${fmtDec(v, 2)}×`;
+  return (
+    <div>
+      <div className="fr-kpi-label">{rotulo}</div>
+      <div className="fr-num" style={{ fontSize: 16, marginTop: 2 }}>{fmt(valor)}</div>
+      <div className="fr-hint" style={{ color: neutro ? undefined : "var(--brand-deep)" }}>
+        {neutro
+          ? "sem alteração"
+          : multiplicador
+            ? `${delta > 0 ? "+" : ""}${fmtPct(delta, 0)} sobre o informado`
+            : `${delta > 0 ? "+" : "−"}${fmtPct(Math.abs(delta), 1)} sobre ${fmt(base)}`}
+      </div>
+    </div>
+  );
 }
 
 function ViewCenarios({ cfg, update, derived }) {
-  const allPresets = [SCENARIO_PRESETS.central, SCENARIO_PRESETS.conservador, SCENARIO_PRESETS.otimista, SCENARIO_PRESETS.maior_mobilizacao, SCENARIO_PRESETS.menor_conversao, SCENARIO_PRESETS.restricao_territorial, ...(cfg.customScenarios || [])];
+  const d = derived;
+  const allPresets = [
+    SCENARIO_PRESETS.central, SCENARIO_PRESETS.conservador, SCENARIO_PRESETS.otimista,
+    SCENARIO_PRESETS.maior_mobilizacao, SCENARIO_PRESETS.menor_conversao, SCENARIO_PRESETS.restricao_territorial,
+    ...(cfg.customScenarios || []),
+  ];
   const [novo, setNovo] = useState({ label: "", abstentionDelta: 0, fidelityDelta: 0, conversionMultiplier: 1 });
 
   const criarCenario = () => {
     if (!novo.label.trim()) return;
-    const s = { id: uid("cenario"), label: novo.label.trim(), abstentionDelta: novo.abstentionDelta, fidelityDelta: novo.fidelityDelta, conversionMultiplier: novo.conversionMultiplier, custom: true };
+    const s = {
+      id: uid("cenario"), label: novo.label.trim(), abstentionDelta: novo.abstentionDelta,
+      fidelityDelta: novo.fidelityDelta, conversionMultiplier: novo.conversionMultiplier, custom: true,
+    };
     update({ customScenarios: [...(cfg.customScenarios || []), s] });
     setNovo({ label: "", abstentionDelta: 0, fidelityDelta: 0, conversionMultiplier: 1 });
+  };
+  const removerCenario = (id) => {
+    update({
+      customScenarios: (cfg.customScenarios || []).filter((s) => s.id !== id),
+      scenarioId: cfg.scenarioId === id ? "central" : cfg.scenarioId,
+    });
   };
 
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Incerteza controlada" title="Cenários" desc="Compare hipóteses diferentes sobre comparecimento, fidelidade, conversão e capacidade." />
+      <SectionHead eyebrow="Incerteza controlada" title="Cenários"
+        desc="Compare hipóteses diferentes sobre comparecimento, fidelidade, conversão e capacidade." />
 
       <div className="fr-card">
         <h2 className="fr-h2">Cenário ativo</h2>
+        <p className="fr-desc">Um cenário desloca as premissas do plano inteiro. Trocar aqui recalcula todas as telas.</p>
         <div className="fr-chip-list" style={{ marginTop: 10 }}>
           {allPresets.map((p) => (
-            <button key={p.id} type="button" className={cx("fr-chip", cfg.scenarioId === p.id && "on")} onClick={() => update({ scenarioId: p.id })}>{p.label}</button>
+            <button key={p.id} type="button" aria-pressed={cfg.scenarioId === p.id}
+              className={cx("fr-chip", cfg.scenarioId === p.id && "on")} onClick={() => update({ scenarioId: p.id })}>
+              {p.label}
+            </button>
           ))}
+        </div>
+        {/* Sem este bloco, clicar num cenário mudava só a borda de um chip: a
+            consequência do clique acontecia em outras telas, fora da vista. */}
+        <div className="fr-cenario-efeito" aria-live="polite">
+          <div className="fr-row fr-between fr-row-wrap" style={{ gap: 8 }}>
+            <b>{d.preset.label}</b>
+            <span className="fr-hint">
+              {d.preset.custom ? "Cenário criado por você" : "Cenário predefinido"}
+            </span>
+          </div>
+          <div className="fr-grid fr-grid-4" style={{ marginTop: 10, gap: 10 }}>
+            <DeltaCenario rotulo="Abstenção" base={cfg.abstentionRate} valor={d.scenario.abstentionRate} pct />
+            <DeltaCenario rotulo="Fidelidade" base={cfg.fidelityRate} valor={d.scenario.fidelityRate} pct />
+            <DeltaCenario rotulo="Conversão dos canais" base={1} valor={d.scenario.conversionMultiplier} multiplicador />
+            <DeltaCenario rotulo="Custo" base={1} valor={d.scenario.costMultiplier} multiplicador />
+          </div>
+          <div className="fr-divider" />
+          <div className="fr-line">
+            <span>Contatos necessários neste cenário</span>
+            <b className="fr-num">{fmtSig(d.totalContactsNeeded)}</b>
+          </div>
+          <div className="fr-line">
+            <span>Meta diária neste cenário</span>
+            <b className="fr-num">{fmtSig(d.dailyContacts)}</b>
+          </div>
+          <div className="fr-line">
+            <span>Custo estimado neste cenário</span>
+            <b className="fr-num">{fmtSig(d.totalCost)}</b>
+          </div>
         </div>
       </div>
 
@@ -1699,19 +2220,38 @@ function ViewCenarios({ cfg, update, derived }) {
         <h2 className="fr-h2">Comparação entre cenários</h2>
         <div className="fr-scroll-x" style={{ marginTop: 10 }}>
           <table className="fr-table">
-            <thead><tr><th>Cenário</th><th className="num">Meta ajustada</th><th className="num">Contatos necessários</th><th className="num">Contatos / dia</th><th className="num">Capacidade / dia</th><th className="num">Gap</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Cenário</th><th className="num">Meta ajustada</th><th className="num">Contatos necessários</th>
+                <th className="num">Contatos / dia</th><th className="num">Capacidade / dia</th><th className="num">Gap</th><th />
+              </tr>
+            </thead>
             <tbody>
               {allPresets.map((p) => {
                 const s = computeScenarioSummary(cfg, p);
                 const active = cfg.scenarioId === p.id;
                 return (
                   <tr key={p.id} style={active ? { background: "var(--brand-soft)" } : undefined}>
-                    <td style={{ fontWeight: active ? 700 : 400 }}>{p.label}{p.custom && <span className="fr-hint"> (personalizado)</span>}</td>
-                    <td className="num">{fmtInt(s.adjustedGoal)}</td>
-                    <td className="num">{fmtInt(s.totalContacts)}</td>
-                    <td className="num">{fmtInt(s.dailyContacts)}</td>
+                    <td style={{ fontWeight: active ? 700 : 400 }}>
+                      {p.label}{p.custom && <span className="fr-hint"> (personalizado)</span>}
+                    </td>
+                    {/* Algarismos significativos, como no painel: a comparação
+                        entre cenários não depende do sétimo dígito, e exibi-lo
+                        sugeriria uma precisão que a taxa de conversão não tem. */}
+                    <td className="num">{fmtSig(s.adjustedGoal)}</td>
+                    <td className="num">{fmtSig(s.totalContacts)}</td>
+                    <td className="num">{fmtSig(s.dailyContacts)}</td>
                     <td className="num">{fmtInt(s.capacity)}</td>
-                    <td className="num" style={{ color: s.gap < 0 ? "var(--danger)" : "var(--oficial)", fontWeight: 700 }}>{s.gap >= 0 ? "+" : ""}{fmtInt(s.gap)}</td>
+                    <td className="num" style={{ color: s.gap < 0 ? "var(--danger-ink)" : "var(--oficial-ink)", fontWeight: 700 }}>
+                      {fmtSigned(s.gap, fmtSig)}
+                    </td>
+                    <td>
+                      {p.custom && (
+                        <button className="fr-icon-btn" aria-label={`Remover cenário ${p.label}`} onClick={() => removerCenario(p.id)}>
+                          <X size={12} />
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -1723,147 +2263,361 @@ function ViewCenarios({ cfg, update, derived }) {
       <div className="fr-card">
         <h2 className="fr-h2">Criar cenário personalizado</h2>
         <div className="fr-grid fr-grid-4" style={{ marginTop: 10 }}>
-          <div className="fr-field"><div className="fr-field-label"><span>Nome</span></div><input type="text" value={novo.label} onChange={(e) => setNovo((n) => ({ ...n, label: e.target.value }))} placeholder="Ex.: Chuvas em outubro" /></div>
-          <NumberField label="Delta de abstenção" value={novo.abstentionDelta} onChange={(v) => setNovo((n) => ({ ...n, abstentionDelta: v }))} step={0.01} suffix="ex.: 0.05 = +5pp" />
-          <NumberField label="Delta de fidelidade" value={novo.fidelityDelta} onChange={(v) => setNovo((n) => ({ ...n, fidelityDelta: v }))} step={0.01} suffix="ex.: -0.05 = −5pp" />
-          <NumberField label="Multiplicador de conversão" value={novo.conversionMultiplier} onChange={(v) => setNovo((n) => ({ ...n, conversionMultiplier: v }))} step={0.05} suffix="1 = sem alteração" />
+          <div className="fr-field">
+            <label className="fr-field-label" htmlFor="cen-nome"><span>Nome</span></label>
+            <input id="cen-nome" type="text" className="fr-input text" value={novo.label}
+              onChange={(e) => setNovo((n) => ({ ...n, label: e.target.value }))} placeholder="Ex.: Chuvas em outubro" />
+          </div>
+          <NumberField label="Delta de abstenção" value={novo.abstentionDelta}
+            onChange={(v) => setNovo((n) => ({ ...n, abstentionDelta: v }))} min={-0.5} max={0.5} step={0.01} suffix="0,05 = +5pp" />
+          <NumberField label="Delta de fidelidade" value={novo.fidelityDelta}
+            onChange={(v) => setNovo((n) => ({ ...n, fidelityDelta: v }))} min={-0.5} max={0.5} step={0.01} suffix="−0,05 = −5pp" />
+          <NumberField label="Multiplicador de conversão" value={novo.conversionMultiplier}
+            onChange={(v) => setNovo((n) => ({ ...n, conversionMultiplier: v }))} min={0.1} max={3} step={0.05} suffix="1 = sem alteração" />
         </div>
-        <button className="fr-btn primary sm" style={{ marginTop: 10 }} onClick={criarCenario}><Plus size={13} /> Salvar cenário</button>
+        <button className="fr-btn primary sm" style={{ marginTop: 10 }} onClick={criarCenario} disabled={!novo.label.trim()}>
+          <Plus size={13} /> Salvar cenário
+        </button>
       </div>
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: SIMULAÇÕES — Monte Carlo (seção 20). Intervalos de incerteza, não
-   previsão eleitoral.
+   VIEW: SIMULATIONS — Monte Carlo over the complete funnel, running the
+   configured channel mix and tracking the current configuration.
    ========================================================================== */
 
-function ViewSimulacoes({ cfg }) {
-  const [bounds, setBounds] = useState({
-    abstentionMin: Math.max(0, cfg.abstentionRate - 0.07), abstentionMax: cfg.abstentionRate + 0.07,
-    fidelityMin: Math.max(0, cfg.fidelityRate - 0.12), fidelityMax: Math.min(1, cfg.fidelityRate + 0.08),
-    conversionMin: 0.08, conversionMax: 0.22, iterations: 3000,
-  });
+function ViewSimulacoes({ cfg, derived }) {
+  const [bounds, setBounds] = useState(() => defaultBounds(cfg));
+  // "Resync" only means anything once the bounds have drifted from the plan.
+  const boundsSincronizados = useMemo(() => {
+    const alvo = defaultBounds(cfg);
+    return Object.keys(alvo).every((k) => Math.abs((bounds[k] ?? 0) - alvo[k]) < 1e-9);
+  }, [cfg, bounds]);
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
+  const [staleSince, setStaleSince] = useState(false);
+
+  // Bounds are captured on mount, so a later change to abstention in the
+  // context bar leaves them stale: warn and offer to resync.
+  useEffect(() => { setStaleSince(true); }, [cfg.abstentionRate, cfg.fidelityRate]);
+
+  const erros = [];
+  if (bounds.abstentionMin >= bounds.abstentionMax) erros.push("Abstenção: o mínimo precisa ser menor que o máximo.");
+  if (bounds.fidelityMin >= bounds.fidelityMax) erros.push("Fidelidade: o mínimo precisa ser menor que o máximo.");
+  if (bounds.conversionMultMin >= bounds.conversionMultMax) erros.push("Multiplicador de conversão: o mínimo precisa ser menor que o máximo.");
+  const modaForaAbst = cfg.abstentionRate < bounds.abstentionMin || cfg.abstentionRate > bounds.abstentionMax;
+  const modaForaFid = cfg.fidelityRate < bounds.fidelityMin || cfg.fidelityRate > bounds.fidelityMax;
 
   const run = () => {
+    if (erros.length) return;
     setRunning(true);
     setTimeout(() => {
-      const mc = runMonteCarlo({
-        voteGoal: cfg.voteGoal,
-        abstentionBounds: { min: bounds.abstentionMin, mode: cfg.abstentionRate, max: bounds.abstentionMax },
-        fidelityBounds: { min: bounds.fidelityMin, mode: cfg.fidelityRate, max: bounds.fidelityMax },
-        conversionBounds: { min: bounds.conversionMin, mode: (bounds.conversionMin + bounds.conversionMax) / 2, max: bounds.conversionMax },
-        iterations: bounds.iterations,
-      });
-      setResult(mc);
+      setResult(runMonteCarlo({ cfg, bounds, iterations: bounds.iterations, seed: 42 }));
       setRunning(false);
+      setStaleSince(false);
     }, 30);
   };
 
-  const chartData = result ? ["min", "p10", "p25", "p50", "p75", "p90", "max"].map((k) => ({ name: k.toUpperCase(), contatos: result.contacts[k], meta: result.adjustedGoal[k] })) : [];
+  const histData = result?.contactsHistogram.map((b) => ({
+    faixa: `${Math.round(b.x0 / 1000)}k`, mid: b.mid, contagem: b.count,
+  })) || [];
 
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Modo pesquisador" title="Simulações" desc="Milhares de simulações combinando comparecimento, fidelidade e conversão — o objetivo é mostrar a faixa de incerteza, não prever o resultado eleitoral." />
+      <SectionHead eyebrow="Modo pesquisador" title="Simulações"
+        desc="Milhares de simulações combinando comparecimento, fidelidade e conversão sobre o mix de canais configurado — o objetivo é mostrar a faixa de incerteza, não prever o resultado eleitoral." />
+
+      <div className="fr-alert info">
+        <Info size={15} />
+        <span>
+          Cada iteração roda o funil inteiro com os {derived.enabledChannels.length} canal(is) ativo(s) e suas
+          cadeias próprias. A incerteza de conversão entra como multiplicador aplicado a cada canal,
+          preservando as diferenças entre eles.
+        </span>
+      </div>
+
       <div className="fr-card">
-        <div className="fr-grid fr-grid-4">
-          <NumberField label="Abstenção — mínimo" value={bounds.abstentionMin} onChange={(v) => setBounds((b) => ({ ...b, abstentionMin: v }))} step={0.01} />
-          <NumberField label="Abstenção — máximo" value={bounds.abstentionMax} onChange={(v) => setBounds((b) => ({ ...b, abstentionMax: v }))} step={0.01} />
-          <NumberField label="Fidelidade — mínimo" value={bounds.fidelityMin} onChange={(v) => setBounds((b) => ({ ...b, fidelityMin: v }))} step={0.01} />
-          <NumberField label="Fidelidade — máximo" value={bounds.fidelityMax} onChange={(v) => setBounds((b) => ({ ...b, fidelityMax: v }))} step={0.01} />
-          <NumberField label="Conversão — mínimo" value={bounds.conversionMin} onChange={(v) => setBounds((b) => ({ ...b, conversionMin: v }))} step={0.01} />
-          <NumberField label="Conversão — máximo" value={bounds.conversionMax} onChange={(v) => setBounds((b) => ({ ...b, conversionMax: v }))} step={0.01} />
-          <NumberField label="Iterações" value={bounds.iterations} onChange={(v) => setBounds((b) => ({ ...b, iterations: v }))} step={500} min={500} max={20000} />
+        <div className="fr-row fr-between fr-row-wrap" style={{ marginBottom: 10 }}>
+          <h2 className="fr-h2">Limites das premissas</h2>
+          <button className="fr-btn sm" onClick={() => setBounds(defaultBounds(cfg))}
+            disabled={boundsSincronizados}
+            title={boundsSincronizados ? "Os limites já refletem o plano atual" : "Recalcula os limites a partir das premissas atuais"}>
+            <RefreshCw size={12} /> Resincronizar com o plano
+          </button>
         </div>
-        <button className="fr-btn primary" style={{ marginTop: 12 }} onClick={run} disabled={running}><Dice5 size={14} /> {running ? "Simulando…" : "Rodar simulação"}</button>
+        <div className="fr-grid fr-grid-4">
+          <NumberField label="Abstenção — mínimo" value={bounds.abstentionMin} min={0} max={1} step={0.01}
+            onChange={(v) => setBounds((b) => ({ ...b, abstentionMin: v }))} />
+          <NumberField label="Abstenção — máximo" value={bounds.abstentionMax} min={0} max={1} step={0.01}
+            onChange={(v) => setBounds((b) => ({ ...b, abstentionMax: v }))} />
+          <NumberField label="Fidelidade — mínimo" value={bounds.fidelityMin} min={0} max={1} step={0.01}
+            onChange={(v) => setBounds((b) => ({ ...b, fidelityMin: v }))} />
+          <NumberField label="Fidelidade — máximo" value={bounds.fidelityMax} min={0} max={1} step={0.01}
+            onChange={(v) => setBounds((b) => ({ ...b, fidelityMax: v }))} />
+          <NumberField label="Multiplicador de conversão — mínimo" value={bounds.conversionMultMin} min={0.05} max={3} step={0.05}
+            onChange={(v) => setBounds((b) => ({ ...b, conversionMultMin: v }))} suffix="0,7 = −30%" />
+          <NumberField label="Multiplicador de conversão — máximo" value={bounds.conversionMultMax} min={0.05} max={3} step={0.05}
+            onChange={(v) => setBounds((b) => ({ ...b, conversionMultMax: v }))} suffix="1,3 = +30%" />
+          <NumberField label="Iterações" value={bounds.iterations} min={500} max={20000} step={500}
+            onChange={(v) => setBounds((b) => ({ ...b, iterations: v }))} />
+        </div>
+
+        <div className="fr-stack" style={{ gap: 8, marginTop: 12 }}>
+          <p className="fr-hint">
+            Moda (valor mais provável) fixada no plano atual: abstenção <b>{fmtPct(cfg.abstentionRate)}</b>,
+            fidelidade <b>{fmtPct(cfg.fidelityRate)}</b>, multiplicador de conversão <b>1,00</b>.
+          </p>
+          {(modaForaAbst || modaForaFid) && (
+            <div className="fr-alert atencao">
+              <AlertTriangle size={15} />
+              <span>A moda do plano está fora dos limites informados; ela será fixada no limite mais próximo para manter as amostras dentro do intervalo declarado.</span>
+            </div>
+          )}
+          {erros.map((e, i) => <p key={i} className="fr-field-error">{e}</p>)}
+          {staleSince && result && !erros.length && (
+            <p className="fr-hint">As premissas do plano mudaram desde a última simulação — rode de novo para atualizar.</p>
+          )}
+        </div>
+
+        <button className="fr-btn primary" style={{ marginTop: 12 }} onClick={run} disabled={running || erros.length > 0}>
+          <Dice5 size={14} /> {running ? "Simulando…" : "Rodar simulação"}
+        </button>
       </div>
 
       {result && (
-        <div className="fr-card">
-          <h2 className="fr-h2">Distribuição — contatos necessários ({fmtInt(result.iterations)} simulações)</h2>
-          <div style={{ height: 300, marginTop: 12 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 6 }}>
-                <CartesianGrid stroke="#E1E4EA" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono" }} />
-                <YAxis tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-                <Tooltip formatter={(v) => fmtInt(v)} contentStyle={{ fontSize: 12 }} />
-                <Bar dataKey="contatos" fill="#3D6BA8" radius={[3, 3, 0, 0]} />
-              </ComposedChart>
-            </ResponsiveContainer>
+        <>
+          <div className="fr-card">
+            <h2 className="fr-h2">Distribuição dos contatos necessários</h2>
+            <p className="fr-desc">
+              {fmtInt(result.iterations)} simulações. Cada barra é a quantidade de simulações que caiu naquela
+              faixa — as linhas marcam a mediana e o intervalo P10–P90.
+            </p>
+            <div style={{ height: 320, marginTop: 12 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={histData} margin={{ top: 10, right: 20, left: 0, bottom: 22 }}>
+                  <CartesianGrid stroke="#E4E4E6" vertical={false} />
+                  <XAxis dataKey="faixa" tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }}
+                    interval="preserveStartEnd"
+                    label={{ value: "Contatos necessários", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4B4D53" } }} />
+                  <YAxis tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }}
+                    label={{ value: "Simulações", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4B4D53" } }} />
+                  <Tooltip contentStyle={{ fontSize: 12 }}
+                    formatter={(v) => [fmtInt(v), "simulações"]}
+                    labelFormatter={(l) => `Faixa ~${l} contatos`} />
+                  <Bar dataKey="contagem" fill="#2F5D96" radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="fr-grid fr-grid-5" style={{ marginTop: 14 }}>
+              <Kpi label="P10 (otimista)" value={fmtInt(result.contacts.p10)} prov={PROV.ESTIMATIVA} />
+              <Kpi label="P25" value={fmtInt(result.contacts.p25)} prov={PROV.ESTIMATIVA} />
+              <Kpi label="Mediana (P50)" value={fmtInt(result.contacts.p50)} prov={PROV.ESTIMATIVA} />
+              <Kpi label="P75" value={fmtInt(result.contacts.p75)} prov={PROV.ESTIMATIVA} />
+              <Kpi label="P90 (pessimista)" value={fmtInt(result.contacts.p90)} prov={PROV.ESTIMATIVA} />
+            </div>
+            <p className="fr-hint" style={{ marginTop: 10 }}>
+              Leitura: em 80% das simulações os contatos necessários ficaram entre{" "}
+              <b className="fr-num">{fmtInt(result.contacts.p10)}</b> e <b className="fr-num">{fmtInt(result.contacts.p90)}</b>.
+              Isto é uma faixa de incerteza sobre premissas, <b>não</b> uma previsão de resultado eleitoral.
+            </p>
           </div>
-          <div className="fr-grid fr-grid-5" style={{ marginTop: 14 }}>
-            <Kpi label="P10" value={fmtInt(result.contacts.p10)} prov="estimativa" />
-            <Kpi label="P25" value={fmtInt(result.contacts.p25)} prov="estimativa" />
-            <Kpi label="Mediana (P50)" value={fmtInt(result.contacts.p50)} prov="estimativa" />
-            <Kpi label="P75" value={fmtInt(result.contacts.p75)} prov="estimativa" />
-            <Kpi label="P90" value={fmtInt(result.contacts.p90)} prov="estimativa" />
+
+          <div className="fr-card">
+            <h2 className="fr-h2">Meta diária correspondente</h2>
+            <div className="fr-scroll-x" style={{ marginTop: 10 }}>
+              <table className="fr-table">
+                <thead>
+                  <tr><th>Percentil</th><th className="num">Meta ajustada</th><th className="num">Contatos</th><th className="num">Contatos / dia</th><th className="num">Capacidade / dia</th></tr>
+                </thead>
+                <tbody>
+                  {["p10", "p25", "p50", "p75", "p90"].map((k) => (
+                    <tr key={k}>
+                      <td>{k.toUpperCase()}</td>
+                      <td className="num">{fmtInt(result.adjustedGoal[k])}</td>
+                      <td className="num">{fmtInt(result.contacts[k])}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{fmtInt(result.daily[k])}</td>
+                      <td className="num" style={{ color: result.daily[k] > derived.dailyCapacity ? "var(--danger-ink)" : "var(--oficial-ink)" }}>
+                        {fmtInt(derived.dailyCapacity)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
 }
 
 /* ============================================================================
-   VIEW: DADOS — registro de fontes (seção 5, 28) e status dos conectores.
+   VIEW: DATA — per indicator, the file the number came from, its reference
+   date and how it was measured.
    ========================================================================== */
 
 const DATA_SOURCE_REGISTRY = [
-  { indicador: "Eleitorado por UF", fonte: "Portal de Dados Abertos do TSE — dataset \"Eleitorado Atual\"", atualizado: "—", ano: "2026", nivel: "UF / Município / Zona / Seção", metodologia: "Extração direta do cadastro eleitoral", tipo: "oficial" },
-  { indicador: "Candidatos e vagas", fonte: "Portal de Dados Abertos do TSE — dataset \"Candidatos\"", atualizado: "—", ano: "2026", nivel: "UF / Município", metodologia: "Registro de candidaturas (DivulgaCand)", tipo: "oficial" },
-  { indicador: "Resultados eleitorais anteriores", fonte: "Portal de Dados Abertos do TSE — resultados por seção", atualizado: "—", ano: "2022 / 2018", nivel: "Seção / Zona / Município / UF", metodologia: "Totalização oficial", tipo: "historico" },
-  { indicador: "Comparecimento e abstenção (demonstração)", fonte: "Valor ilustrativo — não conectado", atualizado: "Nesta sessão", ano: "N/A", nivel: "UF", metodologia: "Placeholder para fins de demonstração da arquitetura", tipo: "estimativa" },
-  { indicador: "Taxas de conversão por canal", fonte: "Inseridas pela equipe de campanha", atualizado: "Contínuo", ano: "2026", nivel: "Canal", metodologia: "Premissa editável pelo usuário", tipo: "premissa" },
-  { indicador: "Malha municipal / território", fonte: "IBGE — Malhas Territoriais e população estimada", atualizado: "—", ano: "2022 (Censo)", nivel: "Município", metodologia: "Não conectado nesta demonstração", tipo: "oficial" },
+  {
+    indicador: "Eleitorado por UF e por município", usadoHoje: "Arquivo perfil_eleitorado_2026.zip do TSE, somado por UF e por município",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.OFICIAL, fonte: "ELEITORADO_2026",
+  },
+  {
+    indicador: "Zonas eleitorais", usadoHoje: "Contagem de NR_ZONA distintos no mesmo arquivo de eleitorado",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "Município", status: "arquivo", tipo: PROV.OFICIAL, fonte: "ELEITORADO_2026",
+  },
+  {
+    indicador: "Comparecimento e abstenção (2022)", usadoHoje: "detalhe_votacao_munzona_2022.zip — QT_COMPARECIMENTO ÷ QT_APTOS",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.HISTORICO, fonte: "COMPARECIMENTO_2022",
+  },
+  {
+    indicador: "Comparecimento e abstenção (2018)", usadoHoje: "detalhe_votacao_munzona_2018.zip — mesmo método",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.HISTORICO, fonte: "COMPARECIMENTO_2018",
+  },
+  {
+    indicador: "Cadeiras na Câmara por UF", usadoHoje: "513 cadeiras, distribuição de 2022 mantida pelo STF para o pleito de 2026",
+    fonteAlvo: "STF / TSE", nivel: "UF", status: "lei", tipo: PROV.OFICIAL, fonte: "VAGAS_CAMARA_2026",
+  },
+  {
+    indicador: "Cadeiras na Assembleia Legislativa", usadoHoje: "Calculado pela regra do art. 27 da Constituição, não tabelado",
+    fonteAlvo: "Constituição Federal", nivel: "UF", status: "lei", tipo: PROV.OFICIAL, fonte: "ASSEMBLEIA_CF27",
+  },
+  {
+    indicador: "Datas do calendário eleitoral", usadoHoje: "Calculadas pela Lei 9.504/1997, art. 1º, a partir do ano do pleito",
+    fonteAlvo: "Resoluções do TSE para o pleito", nivel: "Nacional", status: "lei", tipo: PROV.OFICIAL, fonte: "DATAS_LEI_9504",
+  },
+  {
+    indicador: "Regra de distribuição de vagas", usadoHoje: "Lei 9.504/1997, arts. 106–109 (redação da Lei 14.211/2021)",
+    fonteAlvo: "Resoluções do TSE para o pleito", nivel: "Nacional", status: "lei", tipo: PROV.OFICIAL,
+  },
+  {
+    indicador: "Histórico, presença, capacidade e logística por território", usadoHoje: "Informados pela equipe. Começam neutros (50) — não existe fonte pública para eles",
+    fonteAlvo: "Conhecimento próprio da campanha", nivel: "Território", status: "usuario", tipo: PROV.PREMISSA,
+  },
+  {
+    indicador: "Taxas de conversão por canal", usadoHoje: "Inseridas pela equipe de campanha",
+    fonteAlvo: "Histórico próprio da campanha", nivel: "Canal", status: "usuario", tipo: PROV.PREMISSA,
+  },
+  {
+    indicador: "Abstenção e fidelidade projetadas", usadoHoje: "Premissa da equipe para o pleito que vem, não medição",
+    fonteAlvo: "Pesquisa própria + série histórica", nivel: "Circunscrição", status: "usuario", tipo: PROV.PREMISSA,
+  },
+  {
+    indicador: "Indicadores socioeconômicos", usadoHoje: "Não utilizado em nenhum cálculo",
+    fonteAlvo: "IBGE — Censo 2022", nivel: "Município", status: "nao-conectado", tipo: PROV.HISTORICO,
+  },
 ];
 
-function ViewDados({ cfg }) {
+const STATUS_BADGE = {
+  "nao-conectado": { cls: "perigo", label: "Não conectado" },
+  arquivo: { cls: "oficial", label: "Arquivo oficial" },
+  lei: { cls: "oficial", label: "Definido em lei" },
+  usuario: { cls: "premissa", label: "Informado pela equipe" },
+};
+
+function ViewDados({ derived }) {
+  const d = derived;
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Rastreabilidade" title="Dados" desc="Toda métrica calculada declara sua fonte. Uma estimativa nunca é exibida como se fosse dado oficial." />
+      <SectionHead eyebrow="Rastreabilidade" title="Dados"
+        desc="De onde vem cada número: órgão, arquivo, data de referência e como foi apurado. Uma estimativa nunca é exibida como se fosse dado oficial." />
 
-      <div className="fr-grid fr-grid-3">
-        <div className="fr-card">
-          <div className="fr-row" style={{ justifyContent: "space-between" }}>
-            <h2 className="fr-h2">TSE — Portal de Dados Abertos</h2>
-            <span className="fr-badge" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>Não conectado</span>
-          </div>
-          <p className="fr-desc" style={{ marginTop: 6 }}>dadosabertos.tse.jus.br — eleitorado, candidatos, resultados, prestação de contas, locais de votação. Distribuído em massa (CSV/ZIP por ano), sem autenticação; não é uma API REST tradicional.</p>
-        </div>
-        <div className="fr-card">
-          <div className="fr-row" style={{ justifyContent: "space-between" }}>
-            <h2 className="fr-h2">IBGE</h2>
-            <span className="fr-badge" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>Não conectado</span>
-          </div>
-          <p className="fr-desc" style={{ marginTop: 6 }}>Malhas territoriais, população estimada, indicadores do Censo — usados para cruzar com o eleitorado (o TSE não faz esse cruzamento nativamente).</p>
-        </div>
-        <div className="fr-card">
-          <div className="fr-row" style={{ justifyContent: "space-between" }}>
-            <h2 className="fr-h2">Fontes estaduais/municipais</h2>
-            <span className="fr-badge" style={{ background: "var(--historico-soft)", color: "var(--historico)" }}>Variável por UF</span>
-          </div>
-          <p className="fr-desc" style={{ marginTop: 6 }}>Alguns TREs publicam webservices próprios (ex.: locais de votação em JSON). Conectores modulares, adicionados UF a UF.</p>
+      <div className="fr-alert info">
+        <Info size={15} />
+        <span>
+          <b>Os dados vêm dos arquivos oficiais do TSE, extraídos em {fmtDataBR(FONTES.ELEITORADO_2026.dataColeta)}.</b>{" "}
+          São uma fotografia, não uma consulta em tempo real: o app não faz requisição nenhuma ao
+          navegar. Para atualizar, rode <span className="fr-mono">node scripts/gerar-dados-tse.mjs</span>,
+          que rebaixa os arquivos e regenera <span className="fr-mono">src/dados-tse.js</span>.
+        </span>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">As fontes usadas</h2>
+        <p className="fr-desc">Cada uma com o método de apuração e o link para o material original.</p>
+        <div className="fr-grid fr-grid-3" style={{ marginTop: 12 }}>
+          {Object.keys(FONTES).map((id) => (
+            <div key={id}>
+              <h3 className="fr-h2" style={{ fontSize: 13 }}>{FONTES[id].rotulo}</h3>
+              <div style={{ marginTop: 6 }}><Fonte id={id} /></div>
+            </div>
+          ))}
         </div>
       </div>
 
       <div className="fr-card">
+        <h2 className="fr-h2">Conferência: o que este app afirma hoje</h2>
+        <p className="fr-desc">Números apurados agora, com a configuração atual, para você comparar com a fonte.</p>
+        <div className="fr-grid fr-grid-4" style={{ marginTop: 12 }}>
+          <Kpi label="Eleitorado nacional apurado" value={fmtInt(ELEITORADO_NACIONAL)} prov={PROV.OFICIAL} fonte="ELEITORADO_2026"
+            sub="27 UFs, sem o eleitorado no exterior" />
+          <Kpi label="Eleitorado da circunscrição" value={fmtInt(d.eleitoradoElegivel)} prov={PROV.OFICIAL} fonte="ELEITORADO_2026" />
+          <Kpi label={`Comparecimento medido em ${d.anoReferencia}`} value={fmtPct(d.comparecimentoHistorico)} prov={PROV.HISTORICO}
+            fonte={`COMPARECIMENTO_${d.anoReferencia}`}
+            sub={`abstenção de ${fmtPct(1 - d.comparecimentoHistorico)}`} />
+          <Kpi label="Cadeiras em disputa" value={fmtInt(getVagas({ office: d.office.id, uf: d.uf.code, proportional: {} }))}
+            prov={PROV.OFICIAL} fonte="VAGAS_CAMARA_2026" sub={`${d.office.label} — ${d.uf.name}`} />
+        </div>
+      </div>
+
+      <div className="fr-grid fr-grid-3">
+        {[
+          { nome: "TSE — Portal de Dados Abertos", desc: "dadosabertos.tse.jus.br — eleitorado, candidatos, resultados, prestação de contas, locais de votação. Distribuído em lote (CSV/ZIP por ano), sem autenticação; pede um passo de ETL agendado, não uma chamada em tempo real.", status: "nao-conectado" },
+          { nome: "IBGE", desc: "Malhas territoriais, população estimada, indicadores do Censo — usados para cruzar com o eleitorado (o TSE não faz esse cruzamento nativamente).", status: "nao-conectado" },
+          { nome: "Fontes estaduais / TREs", desc: "Alguns TREs publicam webservices próprios (ex.: locais de votação em JSON). Conectores modulares, adicionados UF a UF.", status: "nao-conectado" },
+        ].map((c) => (
+          <div key={c.nome} className="fr-card">
+            <div className="fr-row fr-between">
+              <h2 className="fr-h2">{c.nome}</h2>
+              <span className="fr-badge perigo"><span className="dot" />Não conectado</span>
+            </div>
+            <p className="fr-desc" style={{ marginTop: 6 }}>{c.desc}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="fr-card">
         <h2 className="fr-h2">Registro de fontes por indicador</h2>
+        <p className="fr-desc">O que o app <b>realmente usa hoje</b> em cada indicador, e qual seria a fonte definitiva.</p>
         <div className="fr-scroll-x" style={{ marginTop: 10 }}>
           <table className="fr-table">
-            <thead><tr><th>Indicador</th><th>Fonte</th><th>Ano</th><th>Nível</th><th>Metodologia</th><th>Tipo</th></tr></thead>
+            <thead>
+              <tr><th>Indicador</th><th>O que é usado hoje</th><th>Fonte</th><th>Nível</th><th>Status</th><th>Classificação</th></tr>
+            </thead>
             <tbody>
-              {DATA_SOURCE_REGISTRY.map((r, i) => (
-                <tr key={i}>
-                  <td>{r.indicador}</td><td>{r.fonte}</td><td className="fr-mono">{r.ano}</td><td>{r.nivel}</td><td>{r.metodologia}</td>
-                  <td><ProvBadge type={r.tipo} /></td>
-                </tr>
-              ))}
+              {DATA_SOURCE_REGISTRY.map((r, i) => {
+                const badge = STATUS_BADGE[r.status];
+                return (
+                  <tr key={i}>
+                    <td><b>{r.indicador}</b></td>
+                    <td>{r.usadoHoje}</td>
+                    <td>
+                      {r.fonte
+                        ? <a href={FONTES[r.fonte].url} target="_blank" rel="noreferrer noopener">{r.fonteAlvo}</a>
+                        : r.fonteAlvo}
+                      {r.fonte && <div className="fr-hint">ref. {fmtDataBR(FONTES[r.fonte].dataReferencia)}</div>}
+                    </td>
+                    <td>{r.nivel}</td>
+                    <td><span className={cx("fr-badge", badge.cls)}><span className="dot" />{badge.label}</span></td>
+                    <td><ProvBadge type={r.tipo} fonte={r.fonte} /></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">O que cada classificação significa</h2>
+        <div className="fr-grid fr-grid-4" style={{ marginTop: 10 }}>
+          {Object.keys(PROV_LABEL).map((k) => (
+            <div key={k}>
+              <ProvBadge type={k} />
+              <p className="fr-hint" style={{ marginTop: 6 }}>{PROV_HELP[k]}</p>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -1871,27 +2625,10 @@ function ViewDados({ cfg }) {
 }
 
 /* ============================================================================
-   VIEW: RELATÓRIOS — exportação, modelos salvos e rastreamento operacional
-   (planejado × realizado, seção 26 e 33). Persistência via localStorage —
-   este é um site estático real, não um artifact do Claude.ai.
+   VIEW: REPORTS — export, saved templates and the operational log. The log
+   lives in App, not here, because the Overview reads it too.
    ========================================================================== */
 
-function readLocal(key, fallback) {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch (e) {
-    return fallback;
-  }
-}
-function writeLocal(key, value) {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
 function downloadBlob(filename, content, mime) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -1899,6 +2636,7 @@ function downloadBlob(filename, content, mime) {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename, bytes: blob.size };
 }
 function toCSV(rows) {
   return rows.map((r) => r.map((cell) => {
@@ -1907,79 +2645,140 @@ function toCSV(rows) {
   }).join(";")).join("\n");
 }
 
-function ViewRelatorios({ cfg, derived, onLoadModel }) {
+function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setModels, log, setLog }) {
   const d = derived;
-  const [models, setModels] = useState(() => readLocal(STORAGE_KEYS.models, []));
-  const [log, setLog] = useState(() => readLocal(STORAGE_KEYS.log, []));
   const [modelName, setModelName] = useState("Modelo de Planejamento v1.0");
-  const [entry, setEntry] = useState({ data: new Date().toISOString().slice(0, 10), territorio: "", equipe: "", atividade: "", planejado: 0, realizado: 0 });
+  const [entry, setEntry] = useState({
+    data: new Date().toISOString().slice(0, 10), territorio: "", atividade: "", planejado: 0, realizado: 0,
+  });
 
   const saveModel = () => {
-    const list = [...models, { id: uid("modelo"), name: modelName || `Modelo ${models.length + 1}`, timestamp: new Date().toISOString(), cfg }];
-    setModels(list); writeLocal(STORAGE_KEYS.models, list);
+    setModels([...models, {
+      id: uid("modelo"), name: modelName.trim() || `Modelo ${models.length + 1}`,
+      timestamp: new Date().toISOString(), schemaVersion: cfg.schemaVersion, cfg,
+    }]);
   };
-  const deleteModel = (id) => {
-    const list = models.filter((m) => m.id !== id);
-    setModels(list); writeLocal(STORAGE_KEYS.models, list);
-  };
+  const deleteModel = (id) => setModels(models.filter((m) => m.id !== id));
   const addEntry = () => {
-    const list = [...log, { ...entry, id: uid("log") }];
-    setLog(list); writeLocal(STORAGE_KEYS.log, list);
+    setLog([...log, { ...entry, id: uid("log") }]);
     setEntry((e) => ({ ...e, planejado: 0, realizado: 0 }));
   };
-  const removeEntry = (id) => {
-    const list = log.filter((l) => l.id !== id);
-    setLog(list); writeLocal(STORAGE_KEYS.log, list);
-  };
+  const removeEntry = (id) => setLog(log.filter((l) => l.id !== id));
   const clearAllData = () => {
-    if (!window.confirm("Isso apaga modelos salvos e o registro operacional deste navegador. Continuar?")) return;
-    writeLocal(STORAGE_KEYS.models, []); writeLocal(STORAGE_KEYS.log, []);
-    setModels([]); setLog([]);
+    if (!window.confirm("Isso apaga modelos salvos, o registro operacional e a configuração atual deste navegador. Continuar?")) return;
+    setModels([]); setLog([]); onResetConfig();
   };
+
+  // A silent download looks like a dead button when the browser files it away
+  // without asking, so each export confirms name and size.
+  const [ultimoArquivo, setUltimoArquivo] = useState(null);
+  const confirmar = (r) => setUltimoArquivo({ ...r, em: new Date() });
 
   const exportJSON = () => {
-    const payload = {
+    confirmar(downloadBlob("plano-operacional.json", JSON.stringify({
       geradoEm: new Date().toISOString(),
+      fontes: Object.fromEntries(Object.entries(FONTES).map(([id, f]) => [id, {
+        orgao: f.orgao, conjunto: f.dataset, arquivo: f.arquivo || null,
+        dataReferencia: f.dataReferencia, extraidoEm: f.dataColeta, url: f.url, metodo: f.metodo,
+      }])),
+      aviso: "Eleitorado e comparecimento vêm dos arquivos do Portal de Dados Abertos do TSE, com as datas de referência declaradas em 'fontes'. Não é consulta em tempo real. Histórico, presença, capacidade e logística por território são premissas da equipe, sem fonte externa.",
+      anoReferenciaComparecimento: d.anoReferencia,
       cargo: d.office.label, uf: d.uf.name, cenario: d.preset.label,
-      metaVotos: cfg.voteGoal, metaAjustada: d.adjustedGoal, contatosNecessarios: d.totalContactsNeeded,
-      contatosDia: d.dailyContacts, capacidadeDia: d.dailyCapacity, custoEstimado: d.totalCost,
-      territorios: d.territories.map((t) => ({ nome: t.name, metaTerritorial: Math.round(t.metaTerritorial) })),
-      canais: d.channelResults.map((c) => ({ canal: c.label, contatosNecessarios: Math.round(c.contactsNeeded), unidadeOperacional: Math.round(c.actionsNeeded), unidade: c.unit })),
-    };
-    downloadBlob("plano-operacional.json", JSON.stringify(payload, null, 2), "application/json");
+      metaVotos: cfg.voteGoal, metaAjustada: d.adjustedGoal,
+      eleitoradoCircunscricao: d.eleitoradoElegivel, votosEsperados: d.eleitoradoEfetivo,
+      metaComoFatiaDosVotos: d.goalShareOfElectorate,
+      contatosNecessarios: d.totalContactsNeeded, contatosDia: d.dailyContacts,
+      capacidadeDia: d.dailyCapacity, capacidadePeriodo: d.campaignCapacity,
+      custoEstimado: d.totalCost, custoPorApoio: d.costPerSupport,
+      contatosRealizados: d.realizado, deficitContatos: d.deficitContatos,
+      territorios: d.territories.map((t) => ({
+        nome: t.name, priorizado: !t.resto, metaTerritorial: Math.round(t.metaTerritorial),
+        participacaoNaMeta: t.share, penetracaoNecessaria: t.penetracaoNecessaria,
+      })),
+      canais: d.channelResults.map((c) => ({
+        canal: c.label, ativo: c.enabled, participacao: c.share, conversao: c.conversion,
+        contatosNecessarios: Math.round(c.contactsNeeded),
+        unidadeOperacional: Math.round(c.actionsNeeded), unidade: c.unit,
+      })),
+      proporcional: d.proportionalResult ? {
+        vagas: d.proportionalResult.vagas, quocienteEleitoral: d.proportionalResult.qe,
+        quocientePartidario: d.proportionalResult.qp, vagasDaLegenda: d.proportionalResult.ownSeats,
+        eleito: d.proportionalResult.minhaLinha?.elected ?? null,
+      } : null,
+      alertas: d.alerts,
+    }, null, 2), "application/json"));
   };
-  const exportCSV = () => {
-    const rows = [["Território", "Meta territorial"], ...d.territories.map((t) => [t.name, Math.round(t.metaTerritorial)])];
-    downloadBlob("plano-territorial.csv", toCSV(rows), "text/csv");
-  };
-  const exportChannelsCSV = () => {
-    const rows = [["Canal", "Participação", "Conversão", "Contatos necessários", "Unidade operacional", "Quantidade"],
-      ...d.channelResults.map((c) => [c.label, fmtPct(c.share), fmtPct(c.conversion), Math.round(c.contactsNeeded), c.unit, Math.round(c.actionsNeeded)])];
-    downloadBlob("plano-canais.csv", toCSV(rows), "text/csv");
-  };
+  const exportTerritoriosCSV = () => confirmar(downloadBlob("plano-territorial.csv", toCSV([
+    ["Território", "Priorizado", "Eleitorado (M)", "% do eleitorado", "% da meta", "Meta territorial", "Penetração exigida"],
+    ...d.territories.map((t) => [
+      t.name, t.resto ? "não" : "sim", t.eleitores, fmtPct(t.eleitoradoShare),
+      fmtPct(t.share), Math.round(t.metaTerritorial), fmtPct(t.penetracaoNecessaria, 2),
+    ]),
+  ]), "text/csv"));
+  const exportCanaisCSV = () => confirmar(downloadBlob("plano-canais.csv", toCSV([
+    ["Canal", "Ativo", "Participação", "Conversão", "Contatos necessários", "Unidade operacional", "Quantidade"],
+    ...d.channelResults.map((c) => [
+      c.label, c.enabled ? "sim" : "não", fmtPct(c.share), fmtPct(c.conversion),
+      Math.round(c.contactsNeeded), c.unit, Math.round(c.actionsNeeded),
+    ]),
+  ]), "text/csv"));
+  const exportLogCSV = () => confirmar(downloadBlob("registro-operacional.csv", toCSV([
+    ["Data", "Território", "Atividade", "Planejado", "Realizado"],
+    ...log.map((l) => [l.data, l.territorio, l.atividade, l.planejado, l.realizado]),
+  ]), "text/csv"));
 
-  const totalPlanejado = log.reduce((a, l) => a + Number(l.planejado || 0), 0);
-  const totalRealizado = log.reduce((a, l) => a + Number(l.realizado || 0), 0);
-  const trackChart = log.map((l, i) => ({ name: `#${i + 1}`, planejado: Number(l.planejado || 0), realizado: Number(l.realizado || 0) }));
+  const trackChart = log
+    .slice()
+    .sort((a, b) => String(a.data).localeCompare(String(b.data)))
+    .reduce((acc, l) => {
+      const prev = acc[acc.length - 1];
+      acc.push({
+        name: l.data,
+        planejado: (prev?.planejado || 0) + Number(l.planejado || 0),
+        realizado: (prev?.realizado || 0) + Number(l.realizado || 0),
+      });
+      return acc;
+    }, []);
 
   return (
     <div className="fr-stack">
-      <SectionHead eyebrow="Saída" title="Relatórios" desc="Exportação do plano, modelos salvos e rastreamento planejado × realizado." />
+      <SectionHead eyebrow="Saída" title="Relatórios"
+        desc="Exportação do plano, modelos salvos e rastreamento planejado × realizado." />
 
       <div className="fr-card">
-        <h2 className="fr-h2">Exportar Plano Operacional</h2>
-        <div className="fr-row" style={{ marginTop: 10, flexWrap: "wrap" }}>
+        <h2 className="fr-h2">Exportar plano operacional</h2>
+        <div className="fr-row fr-row-wrap" style={{ marginTop: 10 }}>
           <button className="fr-btn primary" onClick={exportJSON}><Download size={14} /> JSON completo</button>
-          <button className="fr-btn" onClick={exportCSV}><Download size={14} /> CSV — territórios</button>
-          <button className="fr-btn" onClick={exportChannelsCSV}><Download size={14} /> CSV — canais</button>
+          <button className="fr-btn" onClick={exportTerritoriosCSV}><Download size={14} /> CSV — territórios</button>
+          <button className="fr-btn" onClick={exportCanaisCSV}><Download size={14} /> CSV — canais</button>
+          <button className="fr-btn" onClick={exportLogCSV} disabled={!log.length}><Download size={14} /> CSV — registro</button>
+          <button className="fr-btn" onClick={() => { window.print(); confirmar({ filename: null, impressao: true }); }}>
+            <FileText size={14} /> Imprimir / PDF
+          </button>
         </div>
-        <p className="fr-hint" style={{ marginTop: 8 }}>Exportação de relatório executivo em PDF e planilha completa (XLSX) ficam mais confiáveis geradas no servidor — ver observações técnicas no README do repositório.</p>
+        <div className="fr-export-status" role="status" aria-live="polite">
+          {ultimoArquivo ? (
+            <span className="fr-export-ok">
+              <CheckCircle2 size={14} />
+              {ultimoArquivo.impressao
+                ? "Diálogo de impressão aberto."
+                : <>Gerado <b className="fr-mono">{ultimoArquivo.filename}</b> ({fmtInt(Math.round(ultimoArquivo.bytes / 1024))} kB) às {ultimoArquivo.em.toLocaleTimeString("pt-BR")} — procure na pasta de downloads do navegador.</>}
+            </span>
+          ) : (
+            <span className="fr-hint">Nenhum arquivo gerado nesta sessão ainda.</span>
+          )}
+        </div>
+        <p className="fr-hint" style={{ marginTop: 8 }}>
+          O JSON inclui os alertas ativos e o registro completo de fontes, com data de referência e
+          método de apuração de cada dado. A impressão usa uma folha de estilo própria, sem a navegação.
+        </p>
       </div>
 
       <div className="fr-card">
         <h2 className="fr-h2">Modelos de planejamento salvos</h2>
-        <div className="fr-row" style={{ marginTop: 10, maxWidth: 420 }}>
-          <input type="text" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ flex: 1, fontFamily: "var(--font-sans)", padding: "7px 9px", border: "1px solid var(--line)", borderRadius: 3, fontSize: 12.5 }} />
+        <div className="fr-row" style={{ marginTop: 10, maxWidth: 460 }}>
+          <input type="text" className="fr-input text" aria-label="Nome do modelo"
+            value={modelName} onChange={(e) => setModelName(e.target.value)} />
           <button className="fr-btn sm" onClick={saveModel}><Save size={13} /> Salvar modelo atual</button>
         </div>
         {models.length > 0 ? (
@@ -1994,7 +2793,7 @@ function ViewRelatorios({ cfg, derived, onLoadModel }) {
                     <td>
                       <div className="fr-row">
                         <button className="fr-btn sm" onClick={() => onLoadModel(m.cfg)}>Carregar</button>
-                        <button className="fr-btn sm" onClick={() => deleteModel(m.id)}><X size={12} /></button>
+                        <button className="fr-icon-btn" aria-label={`Excluir ${m.name}`} onClick={() => deleteModel(m.id)}><X size={12} /></button>
                       </div>
                     </td>
                   </tr>
@@ -2003,35 +2802,57 @@ function ViewRelatorios({ cfg, derived, onLoadModel }) {
             </table>
           </div>
         ) : <p className="fr-hint" style={{ marginTop: 10 }}>Nenhum modelo salvo neste navegador ainda.</p>}
+        <p className="fr-hint" style={{ marginTop: 10 }}>
+          Modelos ficam no <code>localStorage</code> deste navegador: não sincronizam entre pessoas nem entre dispositivos.
+        </p>
       </div>
 
       <div className="fr-card">
-        <h2 className="fr-h2">Rastreamento operacional — Planejado × Realizado</h2>
+        <h2 className="fr-h2">Rastreamento operacional — planejado × realizado</h2>
+        <p className="fr-desc">O total realizado alimenta os indicadores de progresso e déficit na Visão Geral.</p>
         <div className="fr-grid fr-grid-5" style={{ marginTop: 10 }}>
-          <div className="fr-field"><div className="fr-field-label"><span>Data</span></div><input type="date" value={entry.data} onChange={(e) => setEntry((x) => ({ ...x, data: e.target.value }))} /></div>
-          <div className="fr-field"><div className="fr-field-label"><span>Território</span></div><input type="text" value={entry.territorio} onChange={(e) => setEntry((x) => ({ ...x, territorio: e.target.value }))} /></div>
-          <div className="fr-field"><div className="fr-field-label"><span>Equipe / atividade</span></div><input type="text" value={entry.atividade} onChange={(e) => setEntry((x) => ({ ...x, atividade: e.target.value }))} /></div>
-          <NumberField label="Contatos planejados" value={entry.planejado} onChange={(v) => setEntry((x) => ({ ...x, planejado: v }))} min={0} />
-          <NumberField label="Contatos realizados" value={entry.realizado} onChange={(v) => setEntry((x) => ({ ...x, realizado: v }))} min={0} />
+          <div className="fr-field">
+            <label className="fr-field-label" htmlFor="log-data"><span>Data</span></label>
+            <input id="log-data" type="date" value={entry.data} onChange={(e) => setEntry((x) => ({ ...x, data: e.target.value }))} />
+          </div>
+          <div className="fr-field">
+            <label className="fr-field-label" htmlFor="log-terr"><span>Território</span></label>
+            <input id="log-terr" type="text" className="fr-input text" value={entry.territorio}
+              onChange={(e) => setEntry((x) => ({ ...x, territorio: e.target.value }))} />
+          </div>
+          <div className="fr-field">
+            <label className="fr-field-label" htmlFor="log-ativ"><span>Equipe / atividade</span></label>
+            <input id="log-ativ" type="text" className="fr-input text" value={entry.atividade}
+              onChange={(e) => setEntry((x) => ({ ...x, atividade: e.target.value }))} />
+          </div>
+          <NumberField label="Contatos planejados" value={entry.planejado} min={0}
+            onChange={(v) => setEntry((x) => ({ ...x, planejado: v }))} />
+          <NumberField label="Contatos realizados" value={entry.realizado} min={0}
+            onChange={(v) => setEntry((x) => ({ ...x, realizado: v }))} />
         </div>
         <button className="fr-btn sm primary" style={{ marginTop: 10 }} onClick={addEntry}><Plus size={13} /> Registrar dia</button>
 
         {log.length > 0 && (
           <>
-            <div className="fr-grid fr-grid-2" style={{ marginTop: 16 }}>
-              <Kpi label="Total planejado" value={fmtInt(totalPlanejado)} />
-              <Kpi label="Total realizado" value={fmtInt(totalRealizado)} sub={`${fmtPct(safeDiv(totalRealizado, totalPlanejado))} do planejado`} />
+            <div className="fr-grid fr-grid-4" style={{ marginTop: 16 }}>
+              <Kpi label="Total planejado" value={fmtInt(d.planejado)} prov={PROV.PREMISSA} />
+              <Kpi label="Total realizado" value={fmtInt(d.realizado)}
+                sub={`${fmtPct(safeDiv(d.realizado, d.planejado))} do planejado`} prov={PROV.PREMISSA} />
+              <Kpi label="Progresso do funil" value={fmtPct(d.progressoFunil)}
+                sub={`de ${fmtInt(d.totalContactsNeeded)} contatos`} prov={PROV.ESTIMATIVA} />
+              <Kpi label="Déficit restante" value={fmtInt(d.deficitContatos)}
+                tone={d.deficitContatos > 0 ? "danger" : "ok"} prov={PROV.ESTIMATIVA} />
             </div>
-            <div style={{ height: 220, marginTop: 14 }}>
+            <div style={{ height: 240, marginTop: 14 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={trackChart} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid stroke="#E1E4EA" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip contentStyle={{ fontSize: 12 }} />
+                  <CartesianGrid stroke="#E4E4E6" />
+                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#4B4D53" }} />
+                  <YAxis tick={{ fontSize: 10, fill: "#4B4D53" }} tickFormatter={(v) => fmtInt(v)} />
+                  <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => fmtInt(v)} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line type="monotone" dataKey="planejado" stroke="#9096AA" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="realizado" stroke="#21418F" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="planejado" name="Planejado (acumulado)" stroke="#5E6066" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="realizado" name="Realizado (acumulado)" stroke="#856616" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -2042,8 +2863,9 @@ function ViewRelatorios({ cfg, derived, onLoadModel }) {
                   {log.map((l) => (
                     <tr key={l.id}>
                       <td className="fr-mono">{l.data}</td><td>{l.territorio}</td><td>{l.atividade}</td>
-                      <td className="num">{fmtInt(l.planejado)}</td><td className="num">{fmtInt(l.realizado)}</td>
-                      <td><button className="fr-icon-btn" onClick={() => removeEntry(l.id)}><X size={12} /></button></td>
+                      <td className="num">{fmtInt(Number(l.planejado))}</td>
+                      <td className="num">{fmtInt(Number(l.realizado))}</td>
+                      <td><button className="fr-icon-btn" aria-label="Remover registro" onClick={() => removeEntry(l.id)}><X size={12} /></button></td>
                     </tr>
                   ))}
                 </tbody>
@@ -2053,124 +2875,316 @@ function ViewRelatorios({ cfg, derived, onLoadModel }) {
         )}
       </div>
 
-      <div className="fr-row" style={{ justifyContent: "flex-end" }}>
-        <button className="fr-btn sm" onClick={clearAllData}>Limpar dados salvos neste navegador</button>
+      <div className="fr-card">
+        <h2 className="fr-h2">Dados guardados neste navegador</h2>
+        <p className="fr-desc">
+          O app não tem conta de usuário nem servidor. Tudo vive no <code>localStorage</code> deste navegador.
+        </p>
+        <div className="fr-row fr-row-wrap" style={{ marginTop: 12 }}>
+          <button className="fr-btn" onClick={onResetConfig}><RotateCcw size={13} /> Restaurar configuração padrão</button>
+          <button className="fr-btn danger" onClick={clearAllData}><Trash2 size={13} /> Apagar tudo deste navegador</button>
+        </div>
       </div>
     </div>
   );
 }
 
 /* ============================================================================
-   CARD: regras jurídico-eleitorais — majoritário (2º turno, margem) e
-   proporcional (quociente eleitoral, quociente partidário, D'Hondt).
-   Parâmetros editáveis, nunca constantes fixas (seção 3).
+   CARD: electoral law rules.
+   Electoral quotient -> party quotient -> leftovers by highest averages with
+   the 80%-of-QE filter (Law 14.211/2021), plus the party's internal ranking.
    ========================================================================== */
 
 function OfficeRulesCard({ cfg, update, derived }) {
   const office = derived.office;
+
   if (office.tipo === "majoritario") {
     const setMaj = (patch) => update({ majoritario: { ...cfg.majoritario, ...patch } });
     return (
       <div className="fr-card">
-        <h2 className="fr-h2">Regras — eleição majoritária</h2>
-        <p className="fr-desc">Vitória por maioria dos votos válidos; segundo turno quando nenhum candidato atinge maioria absoluta (cargos executivos, municípios com mais de 200 mil eleitores).</p>
-        <div className="fr-grid fr-grid-2" style={{ marginTop: 12 }}>
+        <div className="fr-row fr-between">
+          <h2 className="fr-h2">Regras — eleição majoritária</h2>
+          <ProvBadge type={PROV.OFICIAL} />
+        </div>
+        <p className="fr-desc">
+          Vitória por maioria dos votos válidos; segundo turno quando nenhum candidato atinge maioria
+          absoluta (cargos executivos; em municípios, apenas os com mais de 200 mil eleitores).
+        </p>
+        <div className="fr-grid fr-grid-half" style={{ marginTop: 12 }}>
           <label className="fr-row" style={{ fontSize: 12.5 }}>
-            <input type="checkbox" checked={cfg.majoritario.segundoTurno} onChange={(e) => setMaj({ segundoTurno: e.target.checked })} /> Considerar possibilidade de segundo turno
+            <input type="checkbox" checked={cfg.majoritario.segundoTurno}
+              onChange={(e) => setMaj({ segundoTurno: e.target.checked })} />
+            Considerar possibilidade de segundo turno
           </label>
-          <SliderField label="Margem de segurança sobre a meta ajustada" value={cfg.majoritario.margemSeguranca} onChange={(v) => setMaj({ margemSeguranca: v })} min={0} max={0.3} />
+          <SliderField label="Margem de segurança sobre a meta ajustada"
+            value={cfg.majoritario.margemSeguranca} onChange={(v) => setMaj({ margemSeguranca: v })} min={0} max={0.3} />
         </div>
         <div className="fr-divider" />
-        <div className="fr-row" style={{ justifyContent: "space-between", fontSize: 12.5 }}>
+        <div className="fr-line">
           <span>Meta com margem de segurança</span>
           <b className="fr-num">{fmtInt(derived.majoritarioResult?.minVotosSeguranca)}</b>
+        </div>
+        <div className="fr-line">
+          <span>Votos esperados na circunscrição</span>
+          <b className="fr-num">{fmtInt(derived.eleitoradoEfetivo)}</b>
+        </div>
+        <div className="fr-line">
+          <span>Maioria absoluta dos votos esperados</span>
+          <b className="fr-num">{fmtInt(derived.eleitoradoEfetivo / 2)}</b>
         </div>
       </div>
     );
   }
-  if (office.tipo === "proporcional") {
-    const p = cfg.proportional;
-    const r = derived.proportionalResult;
-    const setProp = (patch) => update({ proportional: { ...p, ...patch } });
-    const setOutro = (id, votos) => setProp({ outrosPartidos: p.outrosPartidos.map((o) => (o.id === id ? { ...o, votos } : o)) });
-    return (
+
+  if (office.tipo !== "proporcional") return null;
+
+  const p = cfg.proportional;
+  const r = derived.proportionalResult;
+  if (!r) return null;
+  const setProp = (patch) => update({ proportional: { ...p, ...patch } });
+  const setOutro = (id, campo, valor) => setProp({ outrosPartidos: p.outrosPartidos.map((o) => (o.id === id ? { ...o, [campo]: valor } : o)) });
+  const addOutro = () => setProp({ outrosPartidos: [...p.outrosPartidos, { id: uid("part"), nome: "Nova legenda", votos: 0 }] });
+  const removeOutro = (id) => setProp({ outrosPartidos: p.outrosPartidos.filter((o) => o.id !== id) });
+  const setConc = (id, campo, valor) => setProp({ concorrentes: p.concorrentes.map((c) => (c.id === id ? { ...c, [campo]: valor } : c)) });
+  const addConc = () => setProp({ concorrentes: [...p.concorrentes, { id: uid("conc"), nome: "Novo concorrente", votos: 0 }] });
+  const removeConc = (id) => setProp({ concorrentes: p.concorrentes.filter((c) => c.id !== id) });
+
+  const vagasAuto = getVagas({ ...cfg, proportional: { ...p, vagasOverride: null } });
+
+  return (
+    <div className="fr-stack">
       <div className="fr-card">
-        <h2 className="fr-h2">Regras — eleição proporcional</h2>
-        <p className="fr-desc">Quociente eleitoral, quociente partidário e distribuição das sobras (método D'Hondt / maiores médias). Parâmetros abaixo são editáveis — confirme sempre a resolução do TSE vigente para o pleito antes de uso real.</p>
+        <div className="fr-row fr-between">
+          <h2 className="fr-h2">Regras — eleição proporcional</h2>
+          <ProvBadge type={PROV.OFICIAL} />
+        </div>
+        <p className="fr-desc">
+          Quociente eleitoral → quociente partidário → sobras por maiores médias, conforme os arts.
+          106 a 109 da Lei 9.504/1997, com a redação da Lei 14.211/2021. Confirme sempre a resolução
+          do TSE vigente para o pleito antes de decisões reais.
+        </p>
+
         <div className="fr-grid fr-grid-3" style={{ marginTop: 12 }}>
-          <NumberField label="Vagas em disputa" value={p.vagas} onChange={(v) => setProp({ vagas: v })} min={1} prov="historico" />
-          <NumberField label="Votos válidos da circunscrição" value={p.votosValidosCircunscricao} onChange={(v) => setProp({ votosValidosCircunscricao: v })} min={0} step={10000} prov="premissa" />
-          <NumberField label="Votação estimada da minha legenda" value={p.votosPartido} onChange={(v) => setProp({ votosPartido: v })} min={0} step={10000} prov="premissa" />
+          <div className="fr-field">
+            <label className="fr-field-label" htmlFor="vagas-input">
+              <span>Vagas em disputa</span><ProvBadge type={PROV.HISTORICO} />
+            </label>
+            <div className="fr-row">
+              <input id="vagas-input" type="number" min={1} value={r.vagas}
+                onChange={(e) => setProp({ vagasOverride: parseFloat(e.target.value) || null })} />
+              {isFiniteNum(p.vagasOverride) && p.vagasOverride > 0 && (
+                <button className="fr-icon-btn" title={`Voltar ao valor da circunscrição (${vagasAuto})`}
+                  aria-label="Voltar ao valor automático" onClick={() => setProp({ vagasOverride: null })}>
+                  <RotateCcw size={12} />
+                </button>
+              )}
+            </div>
+            <span className="fr-hint">
+              {isFiniteNum(p.vagasOverride) && p.vagasOverride > 0
+                ? `Sobrescrito manualmente. ${getUf(cfg).name} tem ${vagasAuto}.`
+                : `Vem de ${getUf(cfg).name} / ${office.label}.`}
+            </span>
+          </div>
+          <NumberField label="Votos válidos da circunscrição" value={p.votosValidosCircunscricao}
+            onChange={(v) => setProp({ votosValidosCircunscricao: v })} min={0} step={10000} prov={PROV.PREMISSA} />
+          <NumberField label="Votação estimada da minha legenda" value={p.votosPartido}
+            onChange={(v) => setProp({ votosPartido: v })} min={0} step={10000} prov={PROV.PREMISSA} />
         </div>
-        <div className="fr-grid fr-grid-2" style={{ marginTop: 10 }}>
-          <Kpi label="Quociente eleitoral (QE)" value={fmtInt(r.qe)} prov="estimativa" />
-          <Kpi label="Quociente partidário (QP)" value={fmtInt(r.qp)} sub="cadeiras via quociente, antes das sobras" prov="estimativa" />
+
+        <div className="fr-grid fr-grid-4" style={{ marginTop: 14 }}>
+          <Kpi label="Quociente eleitoral (QE)" value={fmtInt(r.qe)} sub="votos válidos ÷ vagas" prov={PROV.ESTIMATIVA} />
+          <Kpi label="Quociente partidário (QP)" value={fmtInt(r.qp)} sub="vagas antes das sobras" prov={PROV.ESTIMATIVA} />
+          <Kpi label="Vagas da legenda" value={fmtInt(r.ownSeats)}
+            sub={`${r.qp} por quociente + ${r.sobrasDaLegenda} por sobras`} prov={PROV.ESTIMATIVA} />
+          <Kpi label="Mínimo individual (10% do QE)" value={fmtInt(r.limiarIndividual)}
+            sub={cfg.voteGoal >= r.limiarIndividual ? "sua meta supera o mínimo" : "sua meta está abaixo"}
+            tone={cfg.voteGoal >= r.limiarIndividual ? "ok" : "danger"} prov={PROV.ESTIMATIVA} />
         </div>
-        <div className="fr-divider" />
-        <h2 className="fr-h2" style={{ fontSize: 13 }}>Simulador de sobras — método D'Hondt</h2>
-        <div className="fr-stack" style={{ marginTop: 8, gap: 6 }}>
+
+        <Formula title="Como as vagas foram distribuídas"
+          formula={"QE = VOTOS_VÁLIDOS / VAGAS\nQP = parte inteira de (VOTOS_DO_PARTIDO / QE)\n\nSOBRAS = VAGAS − Σ QP,  distribuídas uma a uma para a maior média:\n  MÉDIA = VOTOS_DO_PARTIDO / (VAGAS_JÁ_OBTIDAS + 1)\n\nFiltro (art. 109, §2º): concorre às sobras só o partido com ≥ 80% do QE\ne o candidato com ≥ 20% do QE. Se nenhum partido alcançar, todos concorrem (§3º)."}
+          variables={[
+            { name: "VAGAS", value: fmtInt(r.vagas), prov: PROV.HISTORICO },
+            { name: "QE", value: fmtInt(r.qe), prov: PROV.ESTIMATIVA },
+            { name: "VAGAS_POR_QUOCIENTE", value: fmtInt(r.seatsFromQuotient), prov: PROV.ESTIMATIVA },
+            { name: "SOBRAS_DISTRIBUÍDAS", value: fmtInt(r.sobras), prov: PROV.ESTIMATIVA },
+            { name: "80% DO QE", value: fmtInt(r.qe * SOBRAS_PARTY_THRESHOLD), prov: PROV.ESTIMATIVA },
+            { name: "20% DO QE (candidato)", value: fmtInt(r.limiarSobras), prov: PROV.ESTIMATIVA },
+          ]}
+        >
+          <p style={{ marginTop: 8 }}>
+            {r.restrictedPool
+              ? "Ao menos um partido alcançou 80% do quociente, então só os que alcançaram disputaram as sobras."
+              : "Nenhum partido alcançou 80% do quociente eleitoral — pelo §3º, todos concorreram às sobras."}
+          </p>
+          <p style={{ marginTop: 6 }}>
+            <b>Simplificações:</b> não modelamos o esgotamento da lista de candidatos do partido nem
+            coligações majoritárias. Ambos podem alterar a alocação real.
+          </p>
+        </Formula>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">Legendas concorrentes</h2>
+        <p className="fr-desc">
+          Votos válidos declarados: <b className="fr-num">{fmtInt(p.votosValidosCircunscricao)}</b>.
+          Legendas listadas somam <b className="fr-num">{fmtInt(r.somaDeclarada)}</b>.
+        </p>
+        {r.restanteDeclarado > 0 && (
+          <div className="fr-alert info" style={{ marginTop: 10 }}>
+            <Info size={15} />
+            <span>
+              Sobram <b>{fmtInt(r.restanteDeclarado)}</b> votos não atribuídos a nenhuma legenda listada.
+              {p.incluirDemaisLegendas
+                ? " Eles entram na distribuição como \"Demais legendas\" — sem isso, todas as vagas seriam repartidas apenas entre as legendas acima."
+                : " Eles estão fora da distribuição, o que infla artificialmente as vagas das legendas listadas."}
+            </span>
+          </div>
+        )}
+        <label className="fr-row" style={{ marginTop: 10, fontSize: 12.5 }}>
+          <input type="checkbox" checked={p.incluirDemaisLegendas}
+            onChange={(e) => setProp({ incluirDemaisLegendas: e.target.checked })} />
+          Incluir os votos restantes como "Demais legendas" na distribuição
+        </label>
+
+        <div className="fr-stack" style={{ marginTop: 12, gap: 6 }}>
           {p.outrosPartidos.map((o) => (
             <div key={o.id} className="fr-row">
-              <span style={{ flex: 1, fontSize: 12 }}>{o.nome}</span>
-              <input type="number" value={o.votos} onChange={(e) => setOutro(o.id, parseFloat(e.target.value) || 0)} style={{ width: 130 }} />
+              <input type="text" className="fr-input text" aria-label="Nome da legenda" value={o.nome}
+                onChange={(e) => setOutro(o.id, "nome", e.target.value)} style={{ flex: 1 }} />
+              <input type="number" className="fr-input" aria-label={`Votos de ${o.nome}`} min={0} value={o.votos}
+                onChange={(e) => setOutro(o.id, "votos", Math.max(0, parseFloat(e.target.value) || 0))} style={{ width: 140 }} />
+              <button className="fr-icon-btn" aria-label={`Remover ${o.nome}`} onClick={() => removeOutro(o.id)}><X size={12} /></button>
             </div>
           ))}
         </div>
-        <div className="fr-scroll-x" style={{ marginTop: 10 }}>
+        <button className="fr-btn sm" style={{ marginTop: 10 }} onClick={addOutro}><Plus size={13} /> Adicionar legenda</button>
+
+        <div className="fr-scroll-x" style={{ marginTop: 14 }}>
           <table className="fr-table">
-            <thead><tr><th>Legenda</th><th className="num">Votos</th><th className="num">Cadeiras (D'Hondt)</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Legenda</th><th className="num">Votos</th><th className="num">QP</th>
+                <th className="num">Sobras</th><th className="num">Total de vagas</th><th>Sobras</th>
+              </tr>
+            </thead>
             <tbody>
-              {r.allocation.map((a) => (
+              {r.rows.map((a) => (
                 <tr key={a.id} style={a.id === "own" ? { background: "var(--brand-soft)" } : undefined}>
-                  <td style={{ fontWeight: a.id === "own" ? 700 : 400 }}>{a.name}</td>
+                  <td style={{ fontWeight: a.id === "own" ? 700 : 400 }}>
+                    {a.name}{a.residual && <span className="fr-hint"> (resto declarado)</span>}
+                  </td>
                   <td className="num">{fmtInt(a.votes)}</td>
+                  <td className="num">{a.qp}</td>
+                  <td className="num">{a.sobrasSeats}</td>
                   <td className="num" style={{ fontWeight: 700 }}>{a.seats}</td>
+                  <td>
+                    {a.eligibleForSobras
+                      ? <span className="fr-badge oficial"><span className="dot" />Apta</span>
+                      : <span className="fr-badge perigo"><Lock size={10} />Abaixo de 80% do QE</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>Total</td>
+                <td className="num">{fmtInt(r.rows.reduce((a, x) => a + x.votes, 0))}</td>
+                <td className="num">{r.seatsFromQuotient}</td>
+                <td className="num">{r.sobras}</td>
+                <td className="num">{r.rows.reduce((a, x) => a + x.seats, 0)} / {r.vagas}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">Competição interna da legenda</h2>
+        <p className="fr-desc">
+          A legenda conquista <b>{r.ownSeats}</b> vaga(s). Quem as ocupa é definido pela votação
+          nominal, entre os candidatos que atingem 20% do QE ({fmtInt(r.limiarSobras)} votos).
+        </p>
+        <div className="fr-stack" style={{ marginTop: 12, gap: 6 }}>
+          {p.concorrentes.map((c) => (
+            <div key={c.id} className="fr-row">
+              <input type="text" className="fr-input text" aria-label="Nome do concorrente" value={c.nome}
+                onChange={(e) => setConc(c.id, "nome", e.target.value)} style={{ flex: 1 }} />
+              <input type="number" className="fr-input" aria-label={`Votos de ${c.nome}`} min={0} value={c.votos}
+                onChange={(e) => setConc(c.id, "votos", Math.max(0, parseFloat(e.target.value) || 0))} style={{ width: 140 }} />
+              <button className="fr-icon-btn" aria-label={`Remover ${c.nome}`} onClick={() => removeConc(c.id)}><X size={12} /></button>
+            </div>
+          ))}
+        </div>
+        <button className="fr-btn sm" style={{ marginTop: 10 }} onClick={addConc}><Plus size={13} /> Adicionar concorrente</button>
+
+        <div className="fr-scroll-x" style={{ marginTop: 14 }}>
+          <table className="fr-table">
+            <thead><tr><th className="num">#</th><th>Candidatura</th><th className="num">Votos</th><th>Atinge 20% do QE</th><th>Resultado</th></tr></thead>
+            <tbody>
+              {r.ranking.map((c, i) => (
+                <tr key={c.id} style={c.self ? { background: "var(--brand-soft)" } : undefined}>
+                  <td className="num">{i + 1}</td>
+                  <td style={{ fontWeight: c.self ? 700 : 400 }}>{c.nome}</td>
+                  <td className="num">{fmtInt(c.votos)}</td>
+                  <td>{c.apto ? "sim" : <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>não</span>}</td>
+                  <td>
+                    {c.elected
+                      ? <span className="fr-badge oficial"><CheckCircle2 size={10} />Eleito</span>
+                      : <span className="fr-badge perigo"><span className="dot" />Não eleito</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p className="fr-hint" style={{ marginTop: 8 }}>Cenário de competição interna — participação da minha candidatura no total de votos da legenda: <b className="fr-num">{fmtPct(r.faixaInternaShare)}</b>.</p>
+        <p className="fr-hint" style={{ marginTop: 10 }}>
+          Participação da candidatura no total de votos da legenda: <b className="fr-num">{fmtPct(r.faixaInternaShare)}</b>.
+        </p>
       </div>
-    );
-  }
-  return null;
+    </div>
+  );
 }
 
 /* ============================================================================
-   SIDEBAR + BARRA DE CONTEXTO
+   NAVIGATION
    ========================================================================== */
 
 const NAV_ITEMS = [
-  { id: "visao-geral", label: "Visão Geral", icon: LayoutDashboard },
-  { id: "meta", label: "Meta Eleitoral", icon: Target },
-  { id: "funil", label: "Funil Reverso", icon: Filter },
-  { id: "territorios", label: "Territórios", icon: Map },
-  { id: "publicos", label: "Públicos", icon: Users },
-  { id: "canais", label: "Canais", icon: Radio },
-  { id: "equipes", label: "Equipes", icon: UsersRound },
-  { id: "agenda", label: "Agenda", icon: Calendar },
-  { id: "orcamento", label: "Orçamento", icon: Banknote },
-  { id: "cenarios", label: "Cenários", icon: GitBranch },
-  { id: "simulacoes", label: "Simulações", icon: Dice5 },
-  { id: "dados", label: "Dados", icon: Database },
-  { id: "relatorios", label: "Relatórios", icon: FileText },
+  { id: "visao-geral", label: "Visão Geral", icon: LayoutDashboard, modes: ["assessor", "pesquisador"] },
+  { id: "meta", label: "Meta Eleitoral", icon: Target, modes: ["assessor", "pesquisador"] },
+  { id: "funil", label: "Funil Reverso", icon: Filter, modes: ["assessor", "pesquisador"] },
+  { id: "territorios", label: "Territórios", icon: Map, modes: ["assessor", "pesquisador"] },
+  { id: "publicos", label: "Públicos", icon: Users, modes: ["pesquisador"] },
+  { id: "canais", label: "Canais", icon: Radio, modes: ["assessor", "pesquisador"] },
+  { id: "equipes", label: "Equipes", icon: UsersRound, modes: ["assessor", "pesquisador"] },
+  { id: "agenda", label: "Agenda", icon: Calendar, modes: ["assessor", "pesquisador"] },
+  { id: "orcamento", label: "Orçamento", icon: Banknote, modes: ["assessor", "pesquisador"] },
+  { id: "cenarios", label: "Cenários", icon: GitBranch, modes: ["pesquisador"] },
+  { id: "simulacoes", label: "Simulações", icon: Dice5, modes: ["pesquisador"] },
+  { id: "dados", label: "Dados", icon: Database, modes: ["pesquisador"] },
+  { id: "relatorios", label: "Relatórios", icon: FileText, modes: ["assessor", "pesquisador"] },
 ];
 
+const navForMode = (mode) => NAV_ITEMS.filter((i) => i.modes.includes(mode));
+
 function Sidebar({ active, onSelect, mode, onModeChange, mobileOpen, onCloseMobile }) {
+  const items = navForMode(mode);
   return (
     <>
       {mobileOpen && <div className="fr-sidebar-scrim" onClick={onCloseMobile} />}
-      <aside className={cx("fr-sidebar", mobileOpen && "open")}>
+      <aside className={cx("fr-sidebar", mobileOpen && "open")} aria-label="Navegação principal">
         <div className="fr-brand-block">
           <div className="fr-brand-name">Funil Reverso de Eleição</div>
           <div className="fr-brand-sub">Transforme uma meta de votos em território, público, contatos, atividades, tempo e recursos.</div>
         </div>
         <nav className="fr-nav">
-          {NAV_ITEMS.map((item) => {
+          {items.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} type="button" className={cx("fr-nav-item", active === item.id && "active")}
+              <button key={item.id} type="button" aria-current={active === item.id ? "page" : undefined}
+                className={cx("fr-nav-item", active === item.id && "active")}
                 onClick={() => { onSelect(item.id); onCloseMobile && onCloseMobile(); }}>
                 <Icon size={15} /> {item.label}
               </button>
@@ -2179,126 +3193,270 @@ function Sidebar({ active, onSelect, mode, onModeChange, mobileOpen, onCloseMobi
         </nav>
         <div className="fr-sidebar-foot">
           <div className="fr-hint" style={{ color: "var(--invert-soft)", marginBottom: 6 }}>Modo de exibição</div>
-          <div className="fr-mode-toggle">
-            <button className={cx("fr-mode-btn", mode === "assessor" && "active")} onClick={() => onModeChange("assessor")} type="button">Assessor</button>
-            <button className={cx("fr-mode-btn", mode === "pesquisador" && "active")} onClick={() => onModeChange("pesquisador")} type="button">Pesquisador</button>
+          <div className="fr-mode-toggle" role="group" aria-label="Modo de exibição">
+            <button type="button" aria-pressed={mode === "assessor"}
+              className={cx("fr-mode-btn", mode === "assessor" && "active")} onClick={() => onModeChange("assessor")}>Assessor</button>
+            <button type="button" aria-pressed={mode === "pesquisador"}
+              className={cx("fr-mode-btn", mode === "pesquisador" && "active")} onClick={() => onModeChange("pesquisador")}>Pesquisador</button>
           </div>
+          <p className="fr-mode-note">
+            {mode === "assessor"
+              ? "Operação: metas, território, canais, equipe, prazo e custo."
+              : "Tudo do modo Assessor + fórmulas abertas, parâmetros de cadeia, cenários, simulações e proveniência dos dados."}
+          </p>
         </div>
       </aside>
     </>
   );
 }
 
-function TopContextBar({ cfg, update, derived, onOpenMobile }) {
+function TopContextBar({ cfg, update, derived, onOpenMobile, history }) {
   const office = derived.office;
   return (
     <>
       <div className="fr-mobile-topbar">
-        <button className="fr-icon-btn" onClick={onOpenMobile} style={{ background: "transparent", borderColor: "var(--ink-line)", color: "#fff" }}><Menu size={16} /></button>
+        <button className="fr-icon-btn" aria-label="Abrir navegação" onClick={onOpenMobile}
+          style={{ background: "transparent", borderColor: "var(--ink-line)", color: "#fff" }}>
+          <Menu size={16} />
+        </button>
         <span className="fr-brand-name">Funil Reverso</span>
-        <span style={{ width: 26 }} />
+        <span style={{ width: 28 }} />
       </div>
       <div className="fr-topbar">
-        <div className="fr-ctx-pill"><label>Eleição</label><span className="fr-mono">{cfg.eleicaoAno}</span></div>
         <div className="fr-ctx-pill">
-          <label>Cargo</label>
-          <select value={cfg.office} onChange={(e) => update({ office: e.target.value })}>
+          <label htmlFor="ano-select">Eleição</label>
+          <select id="ano-select" value={cfg.eleicaoAno} onChange={(e) => update({ eleicaoAno: Number(e.target.value) })}>
+            {[2026, 2028, 2030].map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        <div className="fr-ctx-pill">
+          <label htmlFor="ctx-office">Cargo</label>
+          <select id="ctx-office" value={cfg.office} onChange={(e) => update({ office: e.target.value })}>
             {OFFICES.filter((o) => o.tipo !== "chapa").map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
           </select>
         </div>
-        <div className="fr-ctx-pill">
-          <label>UF</label>
-          <select value={cfg.uf} onChange={(e) => update({ uf: e.target.value })}>
-            {UF_DATA.map((u) => <option key={u.code} value={u.code}>{u.code}</option>)}
-          </select>
-        </div>
-        {office.nivel === "municipal" && cfg.uf === "SP" && (
+        {office.nivel !== "nacional" && (
           <div className="fr-ctx-pill">
-            <label>Município</label>
-            <select value={cfg.municipioId} onChange={(e) => update({ municipioId: e.target.value })}>
-              {SP_MUNICIPIOS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            <label htmlFor="ctx-uf">UF</label>
+            <select id="ctx-uf" value={cfg.uf} onChange={(e) => update(mudarUf(cfg, e.target.value))}>
+              {UF_DATA.map((u) => <option key={u.code} value={u.code}>{u.code}</option>)}
+            </select>
+          </div>
+        )}
+        {office.nivel === "municipal" && (
+          <div className="fr-ctx-pill">
+            <label htmlFor="ctx-mun">Município</label>
+            <select id="ctx-mun" value={cfg.municipioId} onChange={(e) => update({ municipioId: e.target.value })}>
+              {getMunicipiosDaUf(cfg.uf).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           </div>
         )}
         <div className="fr-ctx-pill">
-          <label>Cenário</label>
-          <select value={cfg.scenarioId} onChange={(e) => update({ scenarioId: e.target.value })}>
-            {[SCENARIO_PRESETS.central, SCENARIO_PRESETS.conservador, SCENARIO_PRESETS.otimista, SCENARIO_PRESETS.maior_mobilizacao, SCENARIO_PRESETS.menor_conversao, SCENARIO_PRESETS.restricao_territorial, ...(cfg.customScenarios || [])]
-              .map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          <label htmlFor="ctx-cen">Cenário</label>
+          <select id="ctx-cen" value={cfg.scenarioId} onChange={(e) => update({ scenarioId: e.target.value })}>
+            {[SCENARIO_PRESETS.central, SCENARIO_PRESETS.conservador, SCENARIO_PRESETS.otimista,
+              SCENARIO_PRESETS.maior_mobilizacao, SCENARIO_PRESETS.menor_conversao, SCENARIO_PRESETS.restricao_territorial,
+              ...(cfg.customScenarios || [])].map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
         </div>
-        <div className="fr-ctx-pill"><label>Data</label><span className="fr-mono">{new Date().toLocaleDateString("pt-BR")}</span></div>
         <div className="fr-topbar-spacer" />
+        {/* Desfazer/refazer: antes, todo slider escrevia direto no estado global
+            sem nenhuma forma de voltar atrás. */}
+        <div className="fr-row" style={{ gap: 6 }}>
+          <button className="fr-icon-btn" onClick={history.undo} disabled={!history.canUndo}
+            title="Desfazer (Ctrl+Z)" aria-label="Desfazer"><Undo2 size={14} /></button>
+          <button className="fr-icon-btn" onClick={history.redo} disabled={!history.canRedo}
+            title="Refazer (Ctrl+Shift+Z)" aria-label="Refazer"><Redo2 size={14} /></button>
+          <button className="fr-icon-btn" onClick={history.reset}
+            title="Restaurar configuração padrão" aria-label="Restaurar configuração padrão"><RotateCcw size={14} /></button>
+        </div>
       </div>
     </>
   );
 }
 
 /* ============================================================================
-   APP — estado global, persistência local e roteamento por visão.
+   APP
    ========================================================================== */
 
-export default function App() {
-  const [cfg, setCfg] = useState(() => readLocal(STORAGE_KEYS.lastConfig, null) || defaultConfig());
-  const [mode, setMode] = useState("assessor");
-  const [activeView, setActiveView] = useState("visao-geral");
-  const [mobileOpen, setMobileOpen] = useState(false);
+/** Reads the current view from the URL hash (#/territorios), if it is valid. */
+function viewFromHash() {
+  if (typeof window === "undefined" || !window.location) return null;
+  const id = String(window.location.hash || "").replace(/^#\/?/, "");
+  return NAV_ITEMS.some((i) => i.id === id) ? id : null;
+}
 
-  const update = useCallback((patch) => setCfg((prev) => ({ ...prev, ...patch })), []);
+function readLocal(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function writeLocal(key, value) {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
+}
+
+/** State with undo/redo history. */
+function useHistoryState(initial, limit = 60) {
+  const [state, setState] = useState(() => ({
+    past: [], present: typeof initial === "function" ? initial() : initial, future: [],
+  }));
+
+  const set = useCallback((updater) => {
+    setState((s) => {
+      const next = typeof updater === "function" ? updater(s.present) : updater;
+      if (next === s.present) return s;
+      return { past: [...s.past, s.present].slice(-limit), present: next, future: [] };
+    });
+  }, [limit]);
+
+  const replace = useCallback((value) => {
+    setState({ past: [], present: value, future: [] });
+  }, []);
+
+  const undo = useCallback(() => setState((s) => (
+    s.past.length ? { past: s.past.slice(0, -1), present: s.past[s.past.length - 1], future: [s.present, ...s.future] } : s
+  )), []);
+
+  const redo = useCallback(() => setState((s) => (
+    s.future.length ? { past: [...s.past, s.present], present: s.future[0], future: s.future.slice(1) } : s
+  )), []);
+
+  return {
+    value: state.present, set, replace, undo, redo,
+    canUndo: state.past.length > 0, canRedo: state.future.length > 0,
+  };
+}
+
+export default function App() {
+  const hist = useHistoryState(() => migrateConfig(readLocal(STORAGE_KEYS.lastConfig, null)));
+  const cfg = hist.value;
+
+  // Hash routing, so a screen can be linked to and the back button works.
+  const [mode, setMode] = useState(() => {
+    const saved = readLocal(STORAGE_KEYS.mode, null);
+    return saved === "assessor" || saved === "pesquisador" ? saved : "pesquisador";
+  });
+  const [activeView, setActiveView] = useState(() => viewFromHash() || "visao-geral");
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [models, setModelsState] = useState(() => {
+    const v = readLocal(STORAGE_KEYS.models, []);
+    return Array.isArray(v) ? v : [];
+  });
+  const [log, setLogState] = useState(() => {
+    const v = readLocal(STORAGE_KEYS.log, []);
+    return Array.isArray(v) ? v : [];
+  });
+
+  const setModels = useCallback((next) => { setModelsState(next); writeLocal(STORAGE_KEYS.models, next); }, []);
+  const setLog = useCallback((next) => { setLogState(next); writeLocal(STORAGE_KEYS.log, next); }, []);
+
+  const update = useCallback((patch) => hist.set((prev) => ({ ...prev, ...patch })), [hist]);
+
+  const resetConfig = useCallback(() => {
+    hist.replace(defaultConfig());
+    writeLocal(STORAGE_KEYS.lastConfig, defaultConfig());
+  }, [hist]);
 
   useEffect(() => {
     const t = setTimeout(() => writeLocal(STORAGE_KEYS.lastConfig, cfg), 400);
     return () => clearTimeout(t);
   }, [cfg]);
 
-  const derived = useMemo(() => computeAll(cfg), [cfg]);
+  useEffect(() => { writeLocal(STORAGE_KEYS.mode, mode); }, [mode]);
 
-  const viewProps = { cfg, update, derived, mode, setActiveView };
+  // When the current mode hides the requested view (a saved #/simulacoes link
+  // opened in Advisor mode), the fallback is resolved during render: doing it
+  // in an effect flashes the wrong screen for a frame.
+  const effectiveView = navForMode(mode).some((i) => i.id === activeView) ? activeView : "visao-geral";
+
+  useEffect(() => {
+    if (effectiveView !== activeView) setActiveView(effectiveView);
+  }, [effectiveView, activeView]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.location) return;
+    if (viewFromHash() !== effectiveView) {
+      try { window.history.replaceState(null, "", `#/${effectiveView}`); } catch { /* ignora */ }
+    }
+  }, [effectiveView]);
+
+  useEffect(() => {
+    const onHash = () => { const v = viewFromHash(); if (v) setActiveView(v); };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.key.toLowerCase() !== "z") return;
+      e.preventDefault();
+      if (e.shiftKey) hist.redo(); else hist.undo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hist]);
+
+  const tracking = useMemo(() => ({
+    realizado: log.reduce((a, l) => a + (Number(l.realizado) || 0), 0),
+    planejado: log.reduce((a, l) => a + (Number(l.planejado) || 0), 0),
+    entradas: log.length,
+  }), [log]);
+
+  const derived = useMemo(() => computeAll(cfg, tracking), [cfg, tracking]);
+  // 3,000 iterations run in ~40 ms, so recomputing on every assumption change
+  // is cheap. Fixed seed, so the same configuration gives the same range.
+  const incerteza = useMemo(
+    () => runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 3000, seed: 42 }),
+    [cfg],
+  );
+
+  const viewProps = { cfg, update, derived, incerteza, mode, setActiveView };
 
   let body;
-  if (mode === "assessor" && activeView === "funil") {
-    // Modo assessor (seção 37): apenas meta, território, contatos, atividades,
-    // equipe, prazo, progresso e gargalos — sem o detalhamento de pesquisador.
-    body = (
-      <div className="fr-stack">
-        <SectionHead eyebrow="Modo assessor" title="Painel simplificado" desc="Meta, território, contatos, atividades, equipe, prazo, progresso e gargalos." />
-        <div className="fr-grid fr-grid-4">
-          <Kpi label="Meta ajustada" value={fmtInt(derived.adjustedGoal)} prov="estimativa" />
-          <Kpi label="Contatos necessários" value={fmtInt(derived.totalContactsNeeded)} prov="estimativa" />
-          <Kpi label="Equipe (coord. + mobiliz.)" value={fmtInt(cfg.team.coordenadores + cfg.team.mobilizadores)} prov="premissa" />
-          <Kpi label="Prazo" value={`${fmtInt(cfg.campaignDays)} dias`} prov="premissa" />
-        </div>
-        <AlertList alerts={derived.alerts.filter((a) => a.level !== "info")} />
-        <p className="fr-hint">Ative o modo "Pesquisador" na barra lateral para ver todas as variáveis, fórmulas e distribuições.</p>
-      </div>
-    );
-  } else {
-    switch (activeView) {
-      case "visao-geral": body = <ViewVisaoGeral {...viewProps} />; break;
-      case "meta": body = <ViewMetaEleitoral {...viewProps} />; break;
-      case "funil": body = <ViewFunilReverso {...viewProps} />; break;
-      case "territorios": body = <ViewTerritorios {...viewProps} />; break;
-      case "publicos": body = <ViewPublicos {...viewProps} />; break;
-      case "canais": body = <ViewCanais {...viewProps} />; break;
-      case "equipes": body = <ViewEquipes {...viewProps} />; break;
-      case "agenda": body = <ViewAgenda {...viewProps} />; break;
-      case "orcamento": body = <ViewOrcamento {...viewProps} />; break;
-      case "cenarios": body = <ViewCenarios {...viewProps} />; break;
-      case "simulacoes": body = <ViewSimulacoes {...viewProps} />; break;
-      case "dados": body = <ViewDados {...viewProps} />; break;
-      case "relatorios": body = <ViewRelatorios cfg={cfg} derived={derived} onLoadModel={(loadedCfg) => setCfg(loadedCfg)} />; break;
-      default: body = <ViewVisaoGeral {...viewProps} />;
-    }
+  switch (effectiveView) {
+    case "visao-geral": body = <ViewVisaoGeral {...viewProps} />; break;
+    case "meta": body = <ViewMetaEleitoral {...viewProps} />; break;
+    case "funil": body = <ViewFunilReverso {...viewProps} />; break;
+    case "territorios": body = <ViewTerritorios {...viewProps} />; break;
+    case "publicos": body = <ViewPublicos {...viewProps} />; break;
+    case "canais": body = <ViewCanais {...viewProps} />; break;
+    case "equipes": body = <ViewEquipes {...viewProps} />; break;
+    case "agenda": body = <ViewAgenda {...viewProps} />; break;
+    case "orcamento": body = <ViewOrcamento {...viewProps} />; break;
+    case "cenarios": body = <ViewCenarios {...viewProps} />; break;
+    case "simulacoes": body = <ViewSimulacoes {...viewProps} />; break;
+    case "dados": body = <ViewDados {...viewProps} />; break;
+    case "relatorios":
+      body = (
+        <ViewRelatorios
+          cfg={cfg} derived={derived} models={models} setModels={setModels} log={log} setLog={setLog}
+          onLoadModel={(loaded) => hist.set(migrateConfig(loaded))}
+          onResetConfig={resetConfig}
+        />
+      );
+      break;
+    default: body = <ViewVisaoGeral {...viewProps} />;
   }
 
   return (
-    <div className="fr-app">
-      <style>{STYLE}</style>
-      <Sidebar active={activeView} onSelect={setActiveView} mode={mode} onModeChange={setMode} mobileOpen={mobileOpen} onCloseMobile={() => setMobileOpen(false)} />
-      <div className="fr-main">
-        <TopContextBar cfg={cfg} update={update} derived={derived} onOpenMobile={() => setMobileOpen(true)} />
-        <div className="fr-content">{body}</div>
+    <ModeContext.Provider value={mode}>
+      <div className="fr-app">
+        <style>{STYLE}</style>
+        <Sidebar active={effectiveView} onSelect={setActiveView} mode={mode} onModeChange={setMode}
+          mobileOpen={mobileOpen} onCloseMobile={() => setMobileOpen(false)} />
+        <div className="fr-main">
+          <TopContextBar cfg={cfg} update={update} derived={derived}
+            onOpenMobile={() => setMobileOpen(true)}
+            history={{ undo: hist.undo, redo: hist.redo, canUndo: hist.canUndo, canRedo: hist.canRedo, reset: resetConfig }} />
+          <main className="fr-content">{body}</main>
+        </div>
       </div>
-    </div>
+    </ModeContext.Provider>
   );
 }
+
+export { ErrorBoundary };
