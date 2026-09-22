@@ -1,9 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 
-/* Fontes auto-hospedadas (empacotadas pelo Vite). A versão anterior fazia
-   @import de fonts.googleapis.com em tempo de execução — o que contradizia a
-   promessa de que nada sai do navegador. Só os pesos latinos usados. */
+/* Self-hosted fonts, bundled by Vite: an @import from fonts.googleapis.com at
+   runtime would contradict the promise that nothing leaves the browser. Only
+   the latin weights actually used. */
 import "@fontsource/ibm-plex-sans/latin-400.css";
 import "@fontsource/ibm-plex-sans/latin-500.css";
 import "@fontsource/ibm-plex-sans/latin-600.css";

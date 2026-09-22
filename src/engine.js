@@ -1,8 +1,7 @@
 /* ============================================================================
-   FUNIL REVERSO DE ELEIÇÃO — MOTOR DE CÁLCULO
-   Camada pura: sem React, sem DOM, sem acesso a rede. Todas as funções abaixo
-   são determinísticas e testáveis isoladamente (ver src/engine.test.mjs) e
-   podem ser portadas para um backend (Node/Python) sem alteração.
+   REVERSE ELECTION FUNNEL — CALCULATION ENGINE
+   Pure layer: no React, no DOM, no network. Everything here is deterministic
+   and tested in src/engine.test.mjs.
    ========================================================================== */
 
 import {
@@ -12,7 +11,7 @@ import {
 
 export { FONTES, FONTE_DO_CAMPO, ANOS_REFERENCIA, ELEITORADO_NACIONAL, UF_DATA, MUNICIPIOS_POR_UF };
 
-/* ---------------------------- utilidades ---------------------------- */
+/* ---------------------------- utilities ---------------------------- */
 
 export const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 export const safeDiv = (a, b) => (!b || !Number.isFinite(b) ? 0 : a / b);
@@ -34,11 +33,8 @@ export function fmtMoney(n) {
   if (!isFiniteNum(n)) return "—";
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
 }
-/**
- * Número com ALGARISMOS SIGNIFICATIVOS, não com todos os dígitos que a conta
- * produziu. "1.078.431 contatos" sugere precisão à unidade num resultado que
- * saiu de uma taxa de conversão chutada; "1,08 mi" diz o que de fato se sabe.
- */
+/** Significant figures, not every digit the arithmetic produced: unit
+ *  precision would overstate what a guessed conversion rate can support. */
 export function fmtSig(n, sig = 3) {
   if (!Number.isFinite(n)) return "—";
   const abs = Math.abs(n);
@@ -58,7 +54,7 @@ export function fmtSig(n, sig = 3) {
   return v.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: Math.min(casas, 2) }) + e.suf;
 }
 
-/** Faixa "a – b" em algarismos significativos. */
+/** Range "a – b" in significant figures. */
 export function fmtFaixa(min, max, sig = 2) {
   if (!Number.isFinite(min) || !Number.isFinite(max)) return "—";
   return `${fmtSig(min, sig)} – ${fmtSig(max, sig)}`;
@@ -75,8 +71,8 @@ export function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${uidCounter}`;
 }
 
-/** Merge recursivo usado na migração de configurações salvas. Arrays são
- *  substituídos inteiros (não mesclados item a item) de propósito. */
+/** Recursive merge for migrating saved configs. Arrays are replaced whole,
+ *  never merged item by item. */
 export function deepMerge(base, override) {
   if (override === undefined || override === null) return base;
   if (Array.isArray(base) || Array.isArray(override)) return override;
@@ -88,11 +84,8 @@ export function deepMerge(base, override) {
   return out;
 }
 
-/**
- * Datas do pleito a partir do ano. Lei 9.504/1997, art. 1º: 1º turno no
- * primeiro domingo de outubro, 2º turno no último domingo de outubro.
- * (O ano da eleição era um rótulo decorativo na barra de contexto.)
- */
+/** Law 9.504/1997, art. 1: first round on the first Sunday of October,
+ *  runoff on the last Sunday. */
 export function electionDates(year) {
   const y = Number(year);
   if (!Number.isInteger(y) || y < 1900 || y > 2200) return null;
@@ -123,7 +116,7 @@ export const daysBetween = (isoStart, isoEnd) => {
 
 export const electorateEngine = {
   turnoutFromAbstention: (abstentionRate) => clamp01(1 - clamp01(abstentionRate)),
-  /** Eleitores que efetivamente comparecem — o teto físico de qualquer meta. */
+  /** Voters who actually turn out: the physical ceiling of any goal. */
   effectiveElectorate: (eligibleElectorate, turnoutRate) =>
     Math.max(0, eligibleElectorate) * clamp01(turnoutRate),
 };
@@ -135,9 +128,8 @@ export const funnelEngine = {
   },
   contactsForGoalShare: (adjustedGoal, share, conversionRate) => {
     const s = clamp01(share);
-    // Ordem importa: um canal com 0% de participação custa 0 contatos mesmo
-    // quando a meta ajustada é infinita (fidelidade 0). Multiplicar primeiro
-    // produzia Infinity * 0 = NaN, que contaminava o total silenciosamente.
+    // Divide before multiplying: with zero loyalty the adjusted goal is
+    // Infinity, and Infinity * 0 (a 0%-share channel) is NaN.
     if (s === 0) return 0;
     if (!isFiniteNum(adjustedGoal)) return Infinity;
     const goalShare = adjustedGoal * s;
@@ -171,9 +163,8 @@ export const networkEngine = {
 export const TERRITORIAL_FIELDS = ["eleitorado", "historico", "comparecimento", "presenca", "capacidade", "logistica"];
 
 export const territorialEngine = {
-  /** Normaliza um campo para 0..1 dividindo pelo maior valor da lista. Todos os
-   *  seis critérios passam por aqui — antes, "histórico" e "comparecimento"
-   *  entravam como taxa bruta (~0,79) e distorciam os pesos. */
+  /** Normalizes to 0..1 against the largest value in the list. All six
+   *  criteria go through here, so their weights stay comparable. */
   normalizeField: (territories, field) => {
     const max = Math.max(...territories.map((t) => t[field] || 0), 0);
     return territories.map((t) => (max > 0 ? (t[field] || 0) / max : 0));
@@ -210,11 +201,11 @@ export const territorialEngine = {
 };
 
 export const capacityEngine = {
-  /** Contatos que a estrutura entrega em um dia "cheio" (rua + reuniões + eventos). */
+  /** Contacts delivered on a full day: street + meetings + events. */
   dailyCapacity: ({ mobilizadores = 0, horasDia = 0, contatosHora = 0, reunioesDia = 0, contatosPorReuniao = 0, eventosDia = 0, contatosPorEvento = 0 } = {}) =>
     mobilizadores * horasDia * contatosHora + reunioesDia * contatosPorReuniao + eventosDia * contatosPorEvento,
-  /** Capacidade acumulada no período, respeitando quantos dias cada frente
-   *  realmente opera (dias de rua / dias de eventos vindos da Agenda). */
+  /** Each front runs on its own number of days (street vs. events), both
+   *  taken from the Schedule. */
   campaignCapacity: (team = {}, agenda = {}) => {
     const rua = (team.mobilizadores || 0) * (team.horasDia || 0) * (team.contatosHora || 0)
       + (team.reunioesDia || 0) * (team.contatosPorReuniao || 0);
@@ -241,29 +232,24 @@ export const budgetEngine = {
 };
 
 /* ============================================================================
-   REGRAS ELEITORAIS — sistema proporcional brasileiro.
+   ELECTORAL RULES — Brazilian proportional system.
+   Law 9.504/1997, arts. 106-109, as amended by Law 14.211/2021:
 
-   ATENÇÃO: a versão anterior deste arquivo aplicava D'Hondt puro sobre a
-   totalidade das vagas. Isso NÃO é a regra brasileira e produzia resultado
-   incompatível com o quociente partidário exibido na mesma tela.
+     1. Electoral quotient  QE = valid votes / seats  (integer part)
+     2. Party quotient      QP = integer part of (party votes / QE)
+     3. Leftover seats go by highest averages, one at a time:
+        average = party votes / (seats won + 1)
+     4. Only parties at >= 80% of the QE run for leftovers (art. 109, §2);
+        if none qualifies, all of them do (§3)
+     5. Only candidates at >= 20% of the QE can take a seat (§2)
 
-   Regra implementada (Lei 9.504/1997, arts. 106–109, com a redação da Lei
-   14.211/2021):
-     1. Quociente eleitoral  QE = votos válidos / vagas  (parte inteira)
-     2. Quociente partidário QP = parte inteira de (votos do partido / QE)
-     3. As vagas restantes ("sobras") são distribuídas por maiores médias,
-        uma a uma, usando  média = votos do partido / (vagas obtidas + 1)
-     4. Só concorre às sobras o partido que alcançou ao menos 80% do QE
-        (art. 109, §2º). Se nenhum alcançar, todos concorrem (§3º).
-     5. Só pode ocupar vaga o candidato com ao menos 20% do QE (§2º).
-
-   Simplificações declaradas na interface: não modelamos o esgotamento da
-   lista de candidatos do partido nem coligações majoritárias.
+   Not modelled, and stated as much in the UI: exhaustion of a party's
+   candidate list, and majoritarian coalitions.
    ========================================================================== */
 
-export const SOBRAS_PARTY_THRESHOLD = 0.8;   // 80% do QE — art. 109, §2º
-export const CANDIDATE_THRESHOLD = 0.1;      // 10% do QE — art. 108 (nominal mínimo)
-export const SOBRAS_CANDIDATE_THRESHOLD = 0.2; // 20% do QE — art. 109, §2º
+export const SOBRAS_PARTY_THRESHOLD = 0.8;   // 80% of the QE — art. 109, §2
+export const CANDIDATE_THRESHOLD = 0.1;      // 10% of the QE — art. 108 (nominal minimum)
+export const SOBRAS_CANDIDATE_THRESHOLD = 0.2; // 20% of the QE — art. 109, §2
 
 export const electoralRuleEngine = {
   quocienteEleitoral: (votosValidos, vagas) => safeDiv(votosValidos, Math.max(1, vagas)),
@@ -271,10 +257,9 @@ export const electoralRuleEngine = {
   quocientePartidario: (votosPartido, qe) => (qe > 0 ? Math.floor(votosPartido / qe) : 0),
 
   /**
-   * Alocação proporcional brasileira completa.
    * @param {{id:string,name:string,votes:number}[]} parties
-   * @param {number} validVotes votos válidos da circunscrição
-   * @param {number} seats vagas em disputa
+   * @param {number} validVotes valid votes in the constituency
+   * @param {number} seats seats in dispute
    * @returns {{qe:number, rows:Array, sobras:number, steps:Array, seatsFromQuotient:number}}
    */
   allocate: ({ parties, validVotes, seats }) => {
@@ -289,8 +274,8 @@ export const electoralRuleEngine = {
     let remaining = totalSeats - seatsFromQuotient;
     const steps = [];
 
-    // Se os quocientes partidários já excedem as vagas (só ocorre com votos
-    // declarados inconsistentes), devolve sem distribuir sobras e sinaliza.
+    // Quotients over the seat count means the declared votes are inconsistent:
+    // bail out rather than distribute negative leftovers.
     const overAllocated = remaining < 0;
     if (overAllocated) remaining = 0;
 
@@ -323,10 +308,8 @@ export const electoralRuleEngine = {
     };
   },
 
-  /**
-   * Ranking interno da legenda: quem ocupa as vagas que o partido conquistou.
-   * Candidato abaixo de 20% do QE não pode ocupar vaga (art. 109, §2º).
-   */
+  /** Who fills the seats the party won. Below 20% of the QE, nobody can
+   *  (art. 109, §2). */
   partyInternalRanking: ({ myVotes, competitors = [], partySeats, qe }) => {
     const minimo = SOBRAS_CANDIDATE_THRESHOLD * qe;
     const list = [
@@ -346,7 +329,7 @@ export const electoralRuleEngine = {
 };
 
 /* ============================================================================
-   SIMULAÇÃO DE INCERTEZA (Monte Carlo)
+   UNCERTAINTY SIMULATION (Monte Carlo)
    ========================================================================== */
 
 export function mulberry32(seed) {
@@ -360,8 +343,8 @@ export function mulberry32(seed) {
   };
 }
 
-/** Distribuição triangular. A moda é fixada dentro de [min,max]: antes, uma
- *  moda fora dos limites gerava amostras fora do intervalo declarado. */
+/** Triangular distribution. The mode is clamped into [min,max], or samples
+ *  land outside the declared range. */
 export function triangular(rng, min, mode, max) {
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);
@@ -407,16 +390,7 @@ const summarize = (sorted) => ({
   media: sorted.reduce((a, b) => a + b, 0) / sorted.length,
 });
 
-/**
- * Monte Carlo sobre o funil COMPLETO — cada iteração roda o mix de canais
- * configurado, não uma taxa média única. A incerteza de conversão entra como
- * multiplicador aplicado a cada canal, preservando as cadeias próprias.
- */
-/**
- * Limites padrão da incerteza, derivados das próprias premissas do plano.
- * Vivia dentro da tela de Simulações; subiu para o motor porque a faixa deixou
- * de ser um extra escondido e passou a ser o que a Visão Geral exibe.
- */
+/** Default uncertainty bounds, derived from the plan's own assumptions. */
 export function defaultBounds(cfg) {
   return {
     abstentionMin: Math.max(0, Math.round((cfg.abstentionRate - 0.07) * 100) / 100),
@@ -437,8 +411,7 @@ export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, chann
   const dailyArr = [];
   const costArr = [];
   const enabled = channelDefs.filter((def) => cfg.channels?.[def.id]?.enabled);
-  // O custo depende dos contatos, então ele carrega a mesma incerteza — antes
-  // a simulação parava nos contatos e o orçamento seguia exibido como exato.
+  // Cost is a function of contacts, so it inherits the same uncertainty.
   const preset = getScenarioPreset(cfg);
   const eventos = (cfg.team?.eventosDia || 0) * Math.max(0, cfg.agenda?.diasEventos || 0);
 
@@ -484,18 +457,16 @@ export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, chann
 }
 
 /* ============================================================================
-   DADOS DE REFERÊNCIA
+   REFERENCE DATA
 
-   Proveniência: TUDO o que é dado externo mora em src/dados-tse.js, gerado por
-   scripts/gerar-dados-tse.mjs a partir dos arquivos originais do Portal de
-   Dados Abertos do TSE. Cada campo declara sua fonte em FONTE_DO_CAMPO, e cada
-   fonte declara órgão, dataset, URL, data de referência e método de apuração.
+   External data lives in src/dados-tse.js, generated by
+   scripts/gerar-dados-tse.mjs from the TSE open data files. Fields map to a
+   source through FONTE_DO_CAMPO; sources carry agency, dataset, URL,
+   reference date and method.
 
-   O que NÃO é dado e por isso não mora lá: desempenho histórico da candidatura,
-   presença de campanha, capacidade instalada e dificuldade logística de cada
-   território. Não existe fonte pública para nenhum dos quatro — são julgamentos
-   da equipe. Entram como PREMISSA editável, com valor neutro por padrão, para
-   que ninguém confunda opinião com medição.
+   Historical performance, campaign presence, installed capacity and
+   logistical difficulty have no public source. They are the team's judgement
+   and enter as editable assumptions, not as data.
    ========================================================================== */
 
 export const PROV = {
@@ -505,7 +476,7 @@ export const PROV = {
   ESTIMATIVA: "estimativa",
 };
 
-/** Classifica um campo territorial: veio de fonte ou é julgamento da equipe? */
+/** Source-backed field, or team judgement? */
 export const PROV_DO_CAMPO = {
   eleitorado: PROV.OFICIAL,
   comparecimento: PROV.HISTORICO,
@@ -516,17 +487,14 @@ export const PROV_DO_CAMPO = {
 };
 
 /**
- * Os quatro critérios sem fonte pública começam NEUTROS (0,5 para todos).
- * Valor neutro importa: normalizeField divide pelo maior da lista, então
- * quatro valores iguais viram 1,0 para todo mundo e o critério não desempata
- * nada até que a equipe efetivamente informe o que sabe. A versão anterior
- * trazia números inventados por território (São Paulo 0,62 de "histórico",
- * Osasco 0,37) que pareciam medição e enviesavam a distribuição da meta.
+ * The sourceless criteria start neutral, and equal values matter: normalizeField
+ * divides by the largest in the list, so an untouched criterion normalizes to
+ * 1.0 everywhere and breaks no tie.
  */
 export const PARAMS_TERRITORIAIS_PADRAO = { historico: 0.5, presenca: 0.5, capacidade: 0.5, logistica: 0.5 };
 export const PARAMS_TERRITORIAIS_CAMPOS = ["historico", "presenca", "capacidade", "logistica"];
 
-/** Parâmetros informados pela equipe para um território, com o padrão neutro. */
+/** A territory's team-entered parameters, falling back to neutral. */
 export function getParamsTerritorio(cfg, id) {
   const salvos = cfg?.territorioParams?.[id] || {};
   const out = { ...PARAMS_TERRITORIAIS_PADRAO };
@@ -536,12 +504,12 @@ export function getParamsTerritorio(cfg, id) {
   return out;
 }
 
-/** Municípios detalhados da UF (os 12 maiores por eleitorado). */
+/** The 12 largest municipalities of the state by electorate. */
 export function getMunicipiosDaUf(uf) {
   return MUNICIPIOS_POR_UF[uf] || [];
 }
 
-/** Comparecimento do território no ano de referência, com queda para 2022. */
+/** Territory turnout in the reference year, falling back to 2022. */
 export function comparecimentoDe(entidade, ano) {
   const h = entidade?.hist || {};
   return h[ano]?.comparecimento ?? h[2022]?.comparecimento ?? h[2018]?.comparecimento ?? 0;
@@ -561,10 +529,9 @@ export const OFFICES = [
   { id: "VEREADOR", label: "Vereador", tipo: "proporcional", nivel: "municipal" },
 ];
 
-/* Etapas do funil. `kind` separa VOLUME (pessoas/contatos — comparáveis entre
-   si) de ESTRUTURA (contagens de configuração). Antes as duas famílias
-   dividiam a mesma escala visual, o que fazia "7 segmentos" e "1.078.431
-   contatos" aparecerem como barras da mesma natureza. */
+/* `kind` keeps VOLUME (people, contacts) off the same scale as STRUCTURE
+   (configuration counts): 7 segments and 1,078,431 contacts are not comparable
+   quantities. */
 export const FUNNEL_STAGES_META = [
   { key: "meta", label: "Meta de votos", prov: PROV.PREMISSA, kind: "volume", unit: "votos" },
   { key: "ajustada", label: "Meta ajustada", prov: PROV.ESTIMATIVA, kind: "volume", unit: "votos" },
@@ -609,8 +576,7 @@ export const CHANNEL_DEFS = [
       { key: "taxaContatoValido", label: "Taxa de contato válido por abordagem", def: 0.65, min: 0, max: 1, step: 0.01, pct: true },
       { key: "taxaRepeticao", label: "Taxa de repetição (abordagens que reencontram alguém já contatado)", def: 0.3, min: 0, max: 0.95, step: 0.01, pct: true },
     ],
-    // taxaRepeticao agora entra na cadeia: abordagem repetida não gera contato
-    // novo. Antes o campo era rotulado "informativo" e não afetava nada.
+    // A repeated approach is not a new contact, hence taxaRepeticao in the chain.
     chain: (p) => p.taxaContatoValido * (1 - p.taxaRepeticao),
   },
   {
@@ -721,7 +687,7 @@ export function defaultConfig() {
     network: { numLiderancas: 400, fanout: 30, taxaAtivacao: 0.6, taxaSobreposicao: 0.25, camadas: 3 },
     territorialWeights: { eleitorado: 0.40, historico: 0.20, comparecimento: 0.10, presenca: 0.15, capacidade: 0.10, logistica: 0.05 },
     territoriosSelecionados: getMunicipiosDaUf("SP").map((m) => m.id),
-    // Julgamentos da equipe por território (sem fonte externa). Vazio = neutro.
+    // Team judgement per territory. Empty means neutral.
     territorioParams: {},
     incluirRestoDoEstado: true,
     publicos: { tematicos: [], faixas: FAIXAS_ETARIAS_PADRAO },
@@ -749,12 +715,12 @@ export function defaultConfig() {
   };
 }
 
-/** Carrega uma configuração salva sobre os padrões atuais, tolerando ausências,
- *  campos extras e formatos antigos. Nunca lança. */
+/** Loads a saved config onto the current defaults, tolerating missing keys,
+ *  extra fields and old formats. Never throws. */
 export function migrateConfig(stored) {
   const base = defaultConfig();
-  // Arrays e primitivos são lixo do ponto de vista de configuração: deepMerge
-  // trata array como substituição total e devolveria um array no lugar do cfg.
+  // deepMerge replaces arrays wholesale, so an array here would come back out
+  // in place of the config object.
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) return base;
   let merged;
   try {
@@ -762,8 +728,8 @@ export function migrateConfig(stored) {
   } catch {
     return base;
   }
-  // Canais: garante que todo canal do código existe no estado carregado, com
-  // todos os seus parâmetros — inclusive os introduzidos depois.
+  // Channels added to the code after the config was saved still need to exist,
+  // with every parameter, in the loaded state.
   const channels = {};
   CHANNEL_DEFS.forEach((def) => {
     const savedChannel = merged.channels?.[def.id] || {};
@@ -811,8 +777,7 @@ export function getMunicipio(cfg) {
   return getMunicipiosDaUf(cfg.uf).find((m) => m.id === cfg.municipioId) || null;
 }
 
-/** Vagas em disputa — derivadas do cargo + UF (antes eram um "70" fixo que não
- *  mudava ao trocar de estado, apesar de o dado existir em UF_DATA). */
+/** Seats in dispute, from office + state. */
 export function getVagas(cfg) {
   const override = cfg.proportional?.vagasOverride;
   if (isFiniteNum(override) && override > 0) return Math.floor(override);
@@ -824,12 +789,10 @@ export function getVagas(cfg) {
 }
 
 /**
- * Territórios em disputa, respeitando o NÍVEL do cargo:
- *   nacional  -> as 27 UFs
- *   estadual  -> municípios detalhados (SP) + "Restante do estado", ou a UF inteira
- *   municipal -> apenas o município selecionado
- * A versão anterior distribuía a meta entre 8 municípios de SP mesmo para
- * Prefeito ou Presidente.
+ * Territories in dispute, per office level:
+ *   national  -> the 27 states
+ *   state     -> detailed municipalities + "rest of the state", or the whole state
+ *   municipal -> the selected municipality alone
  */
 export function buildTerritories(cfg) {
   const uf = getUf(cfg);
@@ -838,8 +801,7 @@ export function buildTerritories(cfg) {
   const ufComparecimento = comparecimentoDe(uf, ano);
   const municipios = getMunicipiosDaUf(cfg.uf);
 
-  /** Monta o território juntando dado medido (eleitorado, comparecimento) com
-   *  os quatro parâmetros que a equipe informa. */
+  /** Joins measured data (electorate, turnout) with the team's parameters. */
   const montar = (base) => ({
     ...base,
     ...getParamsTerritorio(cfg, base.id),
@@ -848,8 +810,8 @@ export function buildTerritories(cfg) {
 
   if (office.nivel === "municipal") {
     const m = getMunicipio(cfg);
-    // Sem recorte detalhado para o município escolhido, usa a média da UF em vez
-    // de fingir um número: eleitorado da UF dividido pelos municípios dela.
+    // No breakdown for this municipality: use the state average rather than
+    // invent a figure.
     const base = m
       ? { id: m.id, name: m.name, eleitores: m.eleitores, zonas: m.zonas, comparecimento: comparecimentoDe(m, ano), estimado: false }
       : { id: `${uf.code}-municipio-medio`, name: `${uf.name} — município médio`,
@@ -865,7 +827,7 @@ export function buildTerritories(cfg) {
     })));
   }
 
-  // Nível estadual: os municípios detalhados da UF + o que sobra do estado.
+  // State level: detailed municipalities plus whatever is left of the state.
   if (municipios.length) {
     const escolhidos = municipios.filter((m) => cfg.territoriosSelecionados.includes(m.id));
     const lista = escolhidos.length ? escolhidos : municipios;
@@ -873,9 +835,8 @@ export function buildTerritories(cfg) {
       id: m.id, name: m.name, eleitores: m.eleitores, zonas: m.zonas,
       comparecimento: comparecimentoDe(m, ano), resto: false, estimado: false,
     }));
-    // Bucket do restante do estado: sem ele, 100% da meta era distribuída entre
-    // municípios que somam uma fração do eleitorado da UF, assumindo
-    // implicitamente zero voto em todo o resto.
+    // Without this bucket the whole goal lands on municipalities that hold a
+    // fraction of the electorate, implying zero votes everywhere else.
     const cobertura = base.reduce((a, t) => a + t.eleitores, 0);
     const restante = Math.max(0, uf.eleitores - cobertura);
     if (cfg.incluirRestoDoEstado && restante > 0) {
@@ -896,11 +857,10 @@ export function buildTerritories(cfg) {
 }
 
 /**
- * Orquestra todos os engines. Puro em relação às entradas.
- * @param {object} cfg configuração completa
- * @param {{realizado:number, planejado:number, entradas:number}} tracking
- *        totais do registro operacional (planejado × realizado)
- * @param {Date} today data de referência — injetada para tornar testável
+ * Orchestrates every engine. Pure with respect to its inputs.
+ * @param {object} cfg the full configuration
+ * @param {{realizado:number, planejado:number, entradas:number}} tracking totals from the operational log
+ * @param {Date} today reference date, injected so this stays testable
  */
 export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entradas: 0 }, today = new Date()) {
   const office = getOffice(cfg);
@@ -910,22 +870,17 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const turnoutRate = electorateEngine.turnoutFromAbstention(scenario.abstentionRate);
   const adjustedGoal = funnelEngine.adjustedGoal(cfg.voteGoal, scenario.fidelityRate, turnoutRate);
 
-  /* ---- território e universo eleitoral ---- */
+  /* ---- territory and electoral universe ---- */
   const territoriesRaw = buildTerritories(cfg);
   const distributed = territorialEngine.distributeGoal(territoriesRaw, cfg.territorialWeights, adjustedGoal);
   const weightSum = Object.values(cfg.territorialWeights).reduce((a, b) => a + b, 0);
   const eleitoradoTotal = distributed.reduce((a, t) => a + t.eleitores, 0);
-  // `penetracaoNecessaria` torna auditável o resultado da ponderação: quanto
-  // dos votos daquele território a meta territorial exige. É o que revela um
-  // peso mal calibrado — um território pequeno com score alto passa a mostrar
-  // uma penetração implausível em vez de esconder o problema em um "score".
+  // `penetracaoNecessaria` is what exposes a badly calibrated weight: a small
+  // territory with a high score shows an implausible share of its own votes.
   //
-  // O comparecimento usado aqui é o MEDIDO naquele território no ano de
-  // referência, não a premissa global de abstenção. São coisas diferentes: a
-  // premissa diz o que a equipe espera do pleito que vem; o comparecimento
-  // histórico é o que de fato aconteceu, e é ele que diferencia um território
-  // do outro. Antes, os dois se confundiam — o seletor de ano de referência
-  // não mexia em nenhum número de saída.
+  // Turnout here is the one measured in that territory in the reference year,
+  // not the global abstention assumption. The assumption is what the team
+  // expects next; measured turnout is what tells territories apart.
   const territories = distributed.map((t) => {
     const votantes = Math.max(0, t.eleitores) * clamp01(t.comparecimento);
     return {
@@ -944,7 +899,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const eleitoresAlvo = territoriosPrioritarios.reduce((a, t) => a + t.votantesEstimados, 0);
   const goalShareOfElectorate = safeDiv(cfg.voteGoal, eleitoradoEfetivo);
 
-  /* ---- canais ---- */
+  /* ---- channels ---- */
   const channelResults = CHANNEL_DEFS.map((def) => {
     const st = cfg.channels[def.id];
     const conversion = clamp01(st.conversion * scenario.conversionMultiplier);
@@ -961,7 +916,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const networkTrail = networkEngine.layeredReach(cfg.network.numLiderancas, cfg.network.fanout, cfg.network.taxaAtivacao, cfg.network.taxaSobreposicao, cfg.network.camadas);
   const networkFinalReach = networkTrail[networkTrail.length - 1]?.count || 0;
 
-  /* ---- tempo ---- */
+  /* ---- time ---- */
   const diasCorridos = daysBetween(cfg.agenda.dataInicio, cfg.agenda.dataFim);
   const diasAtivosAgenda = Math.max(0, diasCorridos - (cfg.agenda.diasDescanso || 0));
   const hojeISO = today.toISOString().slice(0, 10);
@@ -970,19 +925,18 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const dailyContacts = funnelEngine.dailyTarget(totalContactsNeeded, cfg.campaignDays);
   const weeklyContacts = isFiniteNum(dailyContacts) ? dailyContacts * 7 : Infinity;
 
-  /* ---- capacidade ---- */
+  /* ---- capacity ---- */
   const dailyCapacityBase = capacityEngine.dailyCapacity(cfg.team);
   const dailyCapacity = dailyCapacityBase * (scenario.capacityMultiplier || 1);
   const capacityGap = capacityEngine.gap(dailyContacts, dailyCapacity);
   const capacityStatus = capacityEngine.status(dailyContacts, dailyCapacity);
-  // Capacidade acumulada usa os dias por frente vindos da Agenda (dias de rua,
-  // dias de eventos) — antes esses campos existiam na tela e não entravam em
-  // nenhum cálculo.
+  // Street days and event days come from the Schedule; the two fronts do not
+  // run on the same calendar.
   const campaignCapacity = capacityEngine.campaignCapacity(cfg.team, cfg.agenda) * (scenario.capacityMultiplier || 1);
   const campaignCapacityGap = capacityEngine.gap(totalContactsNeeded, campaignCapacity);
   const campaignCapacityStatus = capacityEngine.status(totalContactsNeeded, campaignCapacity);
 
-  /* ---- orçamento ---- */
+  /* ---- budget ---- */
   const eventosTotal = (cfg.team.eventosDia || 0) * Math.max(0, cfg.agenda.diasEventos || 0);
   const totalCostBase = budgetEngine.totalCost({
     totalContacts: totalContactsNeeded, custoPorContato: cfg.budget.custoPorContato,
@@ -996,7 +950,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const metaPorEquipe = safeDiv(totalContactsNeeded, Math.max(1, cfg.team.coordenadores));
   const metaPorMobilizador = safeDiv(dailyContacts, Math.max(1, cfg.team.mobilizadores));
 
-  /* ---- rastreamento (planejado × realizado) ---- */
+  /* ---- tracking (planned x done) ---- */
   const realizado = Math.max(0, tracking?.realizado || 0);
   const planejado = Math.max(0, tracking?.planejado || 0);
   const deficitContatos = isFiniteNum(totalContactsNeeded) ? totalContactsNeeded - realizado : Infinity;
@@ -1005,12 +959,12 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const esperadoAteAgora = isFiniteNum(dailyContacts) ? dailyContacts * diasDecorridos : 0;
   const ritmoVsEsperado = esperadoAteAgora > 0 ? safeDiv(realizado, esperadoAteAgora) : null;
 
-  /* ---- públicos ---- */
+  /* ---- audiences ---- */
   const faixas = cfg.publicos?.faixas?.length || 0;
   const tematicos = cfg.publicos?.tematicos?.length || 0;
   const segmentsCount = faixas + tematicos;
 
-  /* ---- regras do cargo ---- */
+  /* ---- office rules ---- */
   let proportionalResult = null;
   if (office.tipo === "proporcional") {
     const p = cfg.proportional;
@@ -1023,8 +977,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
       { id: "own", name: "Minha legenda", votes: p.votosPartido || 0 },
       ...p.outrosPartidos.map((o) => ({ id: o.id, name: o.nome, votes: o.votos || 0 })),
     ];
-    // Sem este bucket, as vagas eram distribuídas apenas entre as legendas
-    // listadas, ignorando os votos válidos declarados que sobram.
+    // Valid votes not assigned to a listed party still compete for seats.
     if (p.incluirDemaisLegendas && restante > 0) {
       parties.push({ id: "__demais__", name: "Demais legendas (resto declarado)", votes: restante, residual: true });
     }
@@ -1062,14 +1015,14 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
     };
   }
 
-  /* ---- alertas ---- */
+  /* ---- alerts ---- */
   const alerts = [];
   const push = (level, text) => alerts.push({ level, text });
 
   if (!isFiniteNum(dailyContacts) || cfg.campaignDays <= 0) {
     push("critico", "Meta diária impossível: número de dias de campanha insuficiente ou igual a zero.");
   }
-  // Teto físico: a meta não pode superar quem efetivamente comparece.
+  // The goal cannot exceed the people who actually turn out.
   if (eleitoradoEfetivo > 0 && cfg.voteGoal > eleitoradoEfetivo) {
     push("critico", `Meta de ${fmtInt(cfg.voteGoal)} votos é maior que todo o eleitorado que deve comparecer na circunscrição (${fmtInt(eleitoradoEfetivo)}). A meta é matematicamente inatingível.`);
   } else if (eleitoradoEfetivo > 0 && goalShareOfElectorate > 0.5) {
@@ -1128,17 +1081,15 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   if (planejado > 0 && ritmoVsEsperado !== null && ritmoVsEsperado < 0.85) {
     push("atencao", `Ritmo abaixo do plano: ${fmtInt(realizado)} contatos registrados contra ${fmtInt(esperadoAteAgora)} esperados até aqui (${fmtPct(ritmoVsEsperado)}).`);
   }
-  // Consistência entre o ano do pleito escolhido na barra de contexto e a
-  // janela da Agenda. Antes, trocar 2026 por 2028 deixava "dias restantes"
-  // contando para a eleição antiga, e o único aviso era um texto cinza
-  // escondido dentro de um card da Agenda.
+  // The election year and the Schedule window can disagree, which silently
+  // counts "remaining days" towards the wrong election.
   const datasDoPleito = electionDates(cfg.eleicaoAno);
   if (datasDoPleito && cfg.agenda?.dataFim && cfg.agenda.dataFim !== datasDoPleito.primeiroTurno) {
     const anoDaAgenda = String(cfg.agenda.dataFim).slice(0, 4);
     const nivel = anoDaAgenda === String(cfg.eleicaoAno) ? "atencao" : "critico";
     push(nivel, `A data final da campanha (${cfg.agenda.dataFim}) não é a data do 1º turno de ${cfg.eleicaoAno} (${datasDoPleito.primeiroTurno}). Todo prazo do plano — dias restantes, meta diária — está sendo contado para a data errada. Ajuste em Agenda.`);
   }
-  // A premissa de abstenção contra o que de fato foi medido na circunscrição.
+  // The abstention assumption against what the constituency actually recorded.
   const abstencaoMedida = 1 - comparecimentoHistorico;
   if (comparecimentoHistorico > 0 && Math.abs(cfg.abstentionRate - abstencaoMedida) > 0.05) {
     push("atencao", `A premissa de abstenção (${fmtPct(cfg.abstentionRate)}) está distante da abstenção medida na circunscrição em ${anoReferenciaEfetivo} (${fmtPct(abstencaoMedida)}). Confira em Meta Eleitoral.`);
@@ -1162,7 +1113,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   };
 }
 
-/** Resumo enxuto de um cenário, usado na tabela comparativa. */
+/** Lean summary of a scenario, used in the comparison table. */
 export function computeScenarioSummary(cfg, presetOrCustom) {
   const scenario = scenarioEngine.apply(cfg.abstentionRate, cfg.fidelityRate, presetOrCustom);
   const turnout = electorateEngine.turnoutFromAbstention(scenario.abstentionRate);

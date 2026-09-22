@@ -1,14 +1,14 @@
 /**
- * ARQUIVO GERADO AUTOMATICAMENTE — não edite à mão.
+ * GENERATED FILE — do not edit by hand.
  *
- * Gerado por scripts/gerar-dados-tse.mjs a partir dos arquivos originais do
- * Portal de Dados Abertos do TSE, em 2026-09-15. Cada número aqui tem origem
- * rastreável: nenhum valor foi estimado, arredondado "a olho" ou inventado.
+ * Written by scripts/gerar-dados-tse.mjs from the TSE open data files on 2026-09-15.
+ * Every number here is traceable to a source: none was estimated, eyeballed
+ * or invented.
  *
- * O que NÃO está neste arquivo, por não existir fonte pública: desempenho
- * histórico da candidatura, presença de campanha, capacidade instalada e
- * dificuldade logística por território. Esses quatro são julgamentos da equipe
- * e entram como PREMISSA editável (ver PARAMS_TERRITORIAIS_PADRAO em engine.js).
+ * Absent from this file for lack of a public source: the candidacy's
+ * historical performance, campaign presence, installed capacity and
+ * logistical difficulty per territory. Those four are team judgement and
+ * enter as editable assumptions (see PARAMS_TERRITORIAIS_PADRAO in engine.js).
  */
 
 export const FONTES = {
@@ -77,7 +77,7 @@ export const FONTES = {
   },
 };
 
-/** De qual fonte vem cada campo dos dados territoriais. */
+/** Which source each territorial data field comes from. */
 export const FONTE_DO_CAMPO = {
   eleitores: "ELEITORADO_2026",
   municipios: "ELEITORADO_2026",
@@ -88,10 +88,10 @@ export const FONTE_DO_CAMPO = {
   comparecimento2018: "COMPARECIMENTO_2018",
 };
 
-/** Anos de referência histórica disponíveis. */
+/** Available historical reference years. */
 export const ANOS_REFERENCIA = [2022, 2018];
 
-/** Eleitorado nacional apurado (27 UFs; não inclui o exterior). */
+/** National electorate as counted (27 states; excludes voters abroad). */
 export const ELEITORADO_NACIONAL = 157826587;
 
 export const UF_DATA = [
@@ -125,8 +125,8 @@ export const UF_DATA = [
 ];
 
 /**
- * Os 12 maiores municípios de cada UF, por eleitorado. Não é o estado inteiro:
- * o que sobra entra como "Restante do estado" no cálculo territorial.
+ * The 12 largest municipalities of each state by electorate. Not the whole
+ * state: the remainder enters as "rest of the state" in the territorial split.
  */
 export const MUNICIPIOS_POR_UF = {
   AC: [

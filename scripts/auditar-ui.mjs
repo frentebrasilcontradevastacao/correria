@@ -1,15 +1,13 @@
 /**
- * Auditoria de interface: percorre as 13 views, aciona cada botão, select e
- * slider e verifica se o clique produz ALGUMA consequência observável.
+ * Interface audit: walks the 13 views, fires every button, select and slider
+ * and checks whether it produces any observable consequence.
  *
- * A primeira versão comparava só o texto da tela e por isso acusava como
- * "morto" todo controle cujo efeito não é textual — um chip que só muda de
- * classe, uma aba já ativa, um botão que dispara download. A assinatura agora
- * inclui classes, estados ARIA, valores de formulário, o hash da rota e os
- * downloads interceptados.
+ * The signature compared covers classes, ARIA state, form values, the route
+ * hash and intercepted downloads, not just screen text — otherwise every
+ * control whose effect is not textual reads as dead.
  *
- * Uso:  node scripts/auditar-ui.mjs [url]
- * Requer o app servido (npm run dev) e o Chrome com --remote-debugging-port=9222.
+ * Usage:  node scripts/auditar-ui.mjs [url]
+ * Needs the app served (npm run dev) and Chrome with --remote-debugging-port=9222.
  */
 
 const BASE = process.argv[2] || "http://localhost:5180/correria/";
@@ -44,7 +42,7 @@ async function conectar() {
   return { evaluate, enviar, fechar: () => ws.close() };
 }
 
-/* Tudo que conta como "algo aconteceu". */
+/* Everything that counts as "something happened". */
 const ASSINATURA = `(() => {
   const c = document.querySelector(".fr-content");
   if (!c) return "SEM-CONTENT";
@@ -63,7 +61,7 @@ const ASSINATURA = `(() => {
   });
 })()`;
 
-/* Downloads e impressão não mudam o DOM: são interceptados para virarem sinal. */
+/* Downloads and printing do not touch the DOM, so they are intercepted. */
 const INSTRUMENTAR = `(() => {
   if (!window.__instr) {
     window.__instr = 1; window.__dl = []; window.__print = 0; window.__erros = [];
@@ -116,7 +114,7 @@ for (const view of VIEWS) {
     await sleep(240);
     const depois = await c.evaluate(ASSINATURA);
     if (antes === depois) {
-      // Um controle já ativo não fazer nada é correto, não é defeito.
+      // An already-active control doing nothing is correct, not a defect.
       const jaAtivo = await c.evaluate(`(() => { const b = window.__alvos[${i}];
         return !!b && (b.getAttribute("aria-pressed") === "true" || /\\b(active|on)\\b/.test(b.className)); })()`);
       if (jaAtivo) comEfeito++; else semEfeito.push(rotulo);
@@ -131,7 +129,7 @@ for (const view of VIEWS) {
     }
   }
 
-  /* Selects: troca para uma opção diferente e confere reação. */
+  /* Selects: switch to a different option and check for a reaction. */
   const nSel = await c.evaluate(`(() => { window.__sels = [...document.querySelectorAll(".fr-content select")]; return window.__sels.length; })()`);
   for (let i = 0; i < nSel; i++) {
     const meta = await c.evaluate(`(() => { const e = window.__sels[${i}];
@@ -154,7 +152,7 @@ for (const view of VIEWS) {
     await sleep(500);
   }
 
-  /* Sliders: empurra para o máximo e confere reação. */
+  /* Sliders: push to the maximum and check for a reaction. */
   const nRng = await c.evaluate(`(() => { window.__rngs = [...document.querySelectorAll(".fr-content input[type=range]")]; return window.__rngs.length; })()`);
   for (let i = 0; i < nRng; i++) {
     const rot = await c.evaluate(`(() => { const e = window.__rngs[${i}];

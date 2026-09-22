@@ -12,20 +12,20 @@ const REF_DATE = new Date("2026-08-30T12:00:00Z");
 const run = (cfg, tracking) => computeAll(cfg, tracking ?? { realizado: 0, planejado: 0 }, REF_DATE);
 
 /* -------------------------------------------------------------------------
-   O exemplo obrigatório do briefing é o contrato do app: qualquer refatoração
-   que mexa nele precisa quebrar aqui.
+   The briefing's reference example is the app's contract: any refactor that
+   moves it has to fail here.
    ---------------------------------------------------------------------- */
-test("exemplo obrigatório: Deputado Federal/SP, 110.000 votos", () => {
+test("reference example: Federal Deputy/SP, 110,000 votes", () => {
   const d = run(defaultConfig());
   assert.equal(Math.round(d.adjustedGoal), 161765);
   assert.equal(Math.round(d.totalContactsNeeded), 1078431);
   assert.equal(Math.round(d.dailyContacts), 23965);
 });
 
-/* ---------------------- regras eleitorais (correção principal) ------------ */
+/* ---------------------- electoral rules ---------------------------------- */
 
-test("alocação usa QE/QP + sobras, não D'Hondt puro sobre todas as vagas", () => {
-  // Partido com 900.000 votos, QE = 314.285,7 -> QP = 2.
+test("allocation uses QE/QP + leftovers, not pure D'Hondt over every seat", () => {
+  // A party with 900,000 votes, QE = 314,285.7 -> QP = 2.
   const r = electoralRuleEngine.allocate({
     parties: [
       { id: "own", name: "Minha legenda", votes: 900000 },
@@ -39,25 +39,25 @@ test("alocação usa QE/QP + sobras, não D'Hondt puro sobre todas as vagas", ()
   });
   const own = r.rows.find((p) => p.id === "own");
   assert.equal(own.qp, 2, "quociente partidário");
-  // O total distribuído fecha exatamente nas vagas em disputa.
+  // The distributed total lands exactly on the seats in dispute.
   assert.equal(r.rows.reduce((a, p) => a + p.seats, 0), 70);
-  // As vagas do partido nunca ficam abaixo do seu quociente partidário.
+  // A party's seats never fall below its party quotient.
   assert.ok(own.seats >= own.qp);
-  // D'Hondt puro sobre as 4 legendas antigas dava 7 para a própria legenda;
-  // a regra correta, com os votos válidos reais, dá bem menos.
+  // Pure D'Hondt over the 4 parties gave the party itself 7; the correct rule,
+  // against the real valid votes, gives far fewer.
   assert.ok(own.seats < 7, `esperado < 7, obtido ${own.seats}`);
 });
 
-test("QP e vagas exibidas são consistentes entre si", () => {
+test("the displayed QP and seat count agree with each other", () => {
   const d = run(defaultConfig());
   const p = d.proportionalResult;
   assert.ok(p.ownSeats >= p.qp, "vagas totais não podem ser menores que o QP");
   assert.equal(p.ownSeats, p.qp + p.sobrasDaLegenda);
 });
 
-test("só concorre às sobras quem tem 80% do quociente eleitoral", () => {
-  // QE = 1000. Partido pequeno (300 votos) está abaixo de 800 e não pode
-  // receber sobras; o grande recebe todas.
+test("only parties at 80% of the electoral quotient run for leftovers", () => {
+  // QE = 1000. The small party (300 votes) sits below 800 and takes no
+  // leftovers; the large one takes them all.
   const r = electoralRuleEngine.allocate({
     parties: [
       { id: "grande", name: "Grande", votes: 9700 },
@@ -71,7 +71,7 @@ test("só concorre às sobras quem tem 80% do quociente eleitoral", () => {
   assert.equal(r.restrictedPool, true);
 });
 
-test("se nenhum partido atinge 80% do QE, todos concorrem às sobras (art. 109, §3º)", () => {
+test("if no party reaches 80% of the QE, all of them run for leftovers (art. 109, §3)", () => {
   const r = electoralRuleEngine.allocate({
     parties: [
       { id: "a", name: "A", votes: 300 },
@@ -84,7 +84,7 @@ test("se nenhum partido atinge 80% do QE, todos concorrem às sobras (art. 109, 
   assert.equal(r.rows.reduce((a, p) => a + p.seats, 0), 10);
 });
 
-test("candidato abaixo de 20% do QE não ocupa vaga da legenda", () => {
+test("a candidate below 20% of the QE takes no seat", () => {
   const ranking = electoralRuleEngine.partyInternalRanking({
     myVotes: 100, competitors: [{ id: "c", nome: "Concorrente", votos: 5000 }],
     partySeats: 2, qe: 1000, // limiar = 200
@@ -94,7 +94,7 @@ test("candidato abaixo de 20% do QE não ocupa vaga da legenda", () => {
   assert.equal(eu.elected, false, "candidato inapto não pode ser eleito mesmo sobrando vaga");
 });
 
-test("vagas em disputa acompanham a UF e o cargo", () => {
+test("seats in dispute follow the state and the office", () => {
   const cfg = defaultConfig();
   assert.equal(getVagas(cfg), 70); // SP, Deputado Federal
   assert.equal(getVagas({ ...cfg, uf: "MG" }), 53);
@@ -102,9 +102,9 @@ test("vagas em disputa acompanham a UF e o cargo", () => {
   assert.equal(getVagas({ ...cfg, office: "DEPUTADO_ESTADUAL" }), UF_DATA[0].vagasAssembleia);
 });
 
-/* ---------------------- teto eleitoral ---------------------------------- */
+/* ---------------------- electoral ceiling -------------------------------- */
 
-test("meta acima do eleitorado que comparece gera alerta crítico", () => {
+test("a goal above the turning-out electorate raises a critical alert", () => {
   const cfg = { ...defaultConfig(), uf: "RR", voteGoal: 5000000, territoriosSelecionados: [] };
   const d = run(cfg);
   const critico = d.alerts.find((a) => a.level === "critico" && /inatingível|matematicamente/i.test(a.text));
@@ -112,11 +112,10 @@ test("meta acima do eleitorado que comparece gera alerta crítico", () => {
   assert.ok(d.eleitoradoEfetivo < cfg.voteGoal);
 });
 
-test("votos esperados saem do comparecimento MEDIDO, não da premissa de abstenção", () => {
+test("expected votes come from measured turnout, not the abstention assumption", () => {
   const d = run(defaultConfig());
-  // Soma dos votantes por território, cada um com o comparecimento que o TSE
-  // registrou naquele município. Antes era eleitorado × (1 - abstenção), o que
-  // fazia o seletor de ano de referência não mexer em nada.
+  // Voters summed per territory, each with the turnout the TSE recorded for
+  // that municipality.
   const esperado = d.territories.reduce((a, t) => a + t.eleitores * t.comparecimento, 0);
   assert.ok(Math.abs(d.eleitoradoEfetivo - esperado) < 1, "eleitoradoEfetivo deve somar os votantes medidos");
   assert.notEqual(Math.round(d.eleitoradoEfetivo), Math.round(d.eleitoradoElegivel * d.turnoutRate));
@@ -124,9 +123,9 @@ test("votos esperados saem do comparecimento MEDIDO, não da premissa de absten�
   assert.ok(d.goalShareOfElectorate > 0 && d.goalShareOfElectorate < 1);
 });
 
-/* ---------------------- território -------------------------------------- */
+/* ---------------------- territory ---------------------------------------- */
 
-test("SP inclui o restante do estado — a meta não é 100% nos maiores municípios", () => {
+test("SP includes the rest of the state: the goal is not 100% in the largest municipalities", () => {
   const d = run(defaultConfig());
   const resto = d.territories.find((t) => t.resto);
   assert.ok(resto, "esperava bucket 'Restante do estado'");
@@ -136,14 +135,14 @@ test("SP inclui o restante do estado — a meta não é 100% nos maiores municí
   assert.ok(Math.abs(d.territories.reduce((a, t) => a + t.share, 0) - 1) < 1e-9);
 });
 
-test("histórico e comparecimento são critérios independentes", () => {
+test("historical performance and turnout are independent criteria", () => {
   const cfg = defaultConfig();
-  // "histórico" é julgamento da equipe; "comparecimento" é medição do TSE.
+  // "historical" is team judgement; "turnout" is TSE measurement.
   cfg.territorioParams = { "sp-sao-paulo": { historico: 0.9 } };
   const t = buildTerritories(cfg);
   const capital = t.find((x) => x.id === "sp-sao-paulo");
   assert.notEqual(capital.historicoNorm, capital.comparecimentoNorm);
-  // e ambos estão normalizados em 0..1, como os demais critérios
+  // and both are normalized to 0..1, like the other criteria
   t.forEach((x) => {
     ["eleitorado", "historico", "comparecimento", "presenca", "capacidade", "logistica"].forEach((f) => {
       const v = x[`${f}Norm`];
@@ -152,14 +151,14 @@ test("histórico e comparecimento são critérios independentes", () => {
   });
 });
 
-test("o nível do cargo define o território", () => {
+test("the office level defines the territory", () => {
   const cfg = defaultConfig();
   assert.equal(buildTerritories({ ...cfg, office: "PREFEITO", municipioId: "campinas" }).length, 1);
   assert.equal(buildTerritories({ ...cfg, office: "PRESIDENTE" }).length, UF_DATA.length);
   assert.ok(buildTerritories({ ...cfg, office: "DEPUTADO_FEDERAL" }).length > 1);
 });
 
-test("penetração necessária é exposta por território", () => {
+test("required penetration is exposed per territory", () => {
   const d = run(defaultConfig());
   d.territories.forEach((t) => {
     assert.ok(Number.isFinite(t.penetracaoNecessaria));
@@ -167,25 +166,25 @@ test("penetração necessária é exposta por território", () => {
   });
 });
 
-/* ---------------------- capacidade, agenda, orçamento -------------------- */
+/* ---------------------- capacity, schedule, budget ----------------------- */
 
-test("dias de rua e de eventos da Agenda entram na capacidade do período", () => {
+test("street days and event days from the Schedule enter the period capacity", () => {
   const cfg = defaultConfig();
   const base = run(cfg).campaignCapacity;
   const dobro = run({ ...cfg, agenda: { ...cfg.agenda, diasRua: cfg.agenda.diasRua * 2 } }).campaignCapacity;
   assert.ok(dobro > base, "mudar dias de rua precisa alterar a capacidade acumulada");
 });
 
-test("eventos do orçamento vêm dos dias de eventos da Agenda", () => {
+test("budget events come from the Schedule's event days", () => {
   const cfg = defaultConfig();
   const a = run(cfg).eventosTotal;
   const b = run({ ...cfg, agenda: { ...cfg.agenda, diasEventos: cfg.agenda.diasEventos * 2 } }).eventosTotal;
   assert.equal(b, a * 2);
 });
 
-/* ---------------------- rastreamento ------------------------------------ */
+/* ---------------------- tracking ----------------------------------------- */
 
-test("déficit usa os contatos realizados registrados", () => {
+test("the deficit uses the logged completed contacts", () => {
   const cfg = defaultConfig();
   const d = run(cfg, { realizado: 200000, planejado: 250000 });
   assert.equal(Math.round(d.realizado), 200000);
@@ -193,9 +192,9 @@ test("déficit usa os contatos realizados registrados", () => {
   assert.ok(d.progressoFunil > 0 && d.progressoFunil < 1);
 });
 
-/* ---------------------- segmentos --------------------------------------- */
+/* ---------------------- segments ----------------------------------------- */
 
-test("contagem de segmentos reflete o que está configurado em Públicos", () => {
+test("the segment count reflects what is configured in Audiences", () => {
   const cfg = defaultConfig();
   assert.equal(run(cfg).segmentsCount, 5);
   const comTemas = { ...cfg, publicos: { ...cfg.publicos, tematicos: ["Saúde", "Educação"] } };
@@ -204,7 +203,7 @@ test("contagem de segmentos reflete o que está configurado em Públicos", () =>
 
 /* ---------------------- Monte Carlo ------------------------------------- */
 
-test("triangular nunca sai dos limites, mesmo com moda fora do intervalo", () => {
+test("triangular never leaves its bounds, even with a mode outside the range", () => {
   const rng = mulberry32(7);
   for (let i = 0; i < 5000; i++) {
     const v = triangular(rng, 0.10, 0.90, 0.15); // moda acima do máximo
@@ -217,13 +216,13 @@ test("triangular nunca sai dos limites, mesmo com moda fora do intervalo", () =>
   }
 });
 
-test("Monte Carlo respeita o mix de canais, não uma taxa média única", () => {
+test("Monte Carlo respects the channel mix, not a single average rate", () => {
   const cfg = defaultConfig();
   const bounds = { abstentionMin: 0.13, abstentionMax: 0.27, fidelityMin: 0.73, fidelityMax: 0.93, conversionMultMin: 0.7, conversionMultMax: 1.3 };
   const soCorpoACorpo = runMonteCarlo({ cfg, bounds, iterations: 800, seed: 1 });
 
-  // Move metade da meta para o digital (conversão 2%): a mediana de contatos
-  // tem de subir muito. Com uma taxa média única isso não apareceria.
+  // Move half the goal to digital (2% conversion): the median contact count
+  // has to rise sharply. A single average rate would not show this.
   const misto = structuredClone(cfg);
   misto.channels.corpoACorpo.share = 0.5;
   misto.channels.digital.share = 0.5;
@@ -233,7 +232,7 @@ test("Monte Carlo respeita o mix de canais, não uma taxa média única", () => 
     `mix de canais precisa alterar a distribuição (${comDigital.contacts.p50} vs ${soCorpoACorpo.contacts.p50})`);
 });
 
-test("Monte Carlo é reprodutível e ordenado", () => {
+test("Monte Carlo is reproducible and ordered", () => {
   const cfg = defaultConfig();
   const bounds = { abstentionMin: 0.13, abstentionMax: 0.27, fidelityMin: 0.73, fidelityMax: 0.93, conversionMultMin: 0.8, conversionMultMax: 1.2 };
   const a = runMonteCarlo({ cfg, bounds, iterations: 500, seed: 42 });
@@ -243,9 +242,9 @@ test("Monte Carlo é reprodutível e ordenado", () => {
   assert.ok(a.contactsHistogram.length > 1, "histograma real, não barras de percentil");
 });
 
-/* ---------------------- migração de configuração ------------------------ */
+/* ---------------------- config migration --------------------------------- */
 
-test("configuração antiga (sem canais novos) carrega sem quebrar", () => {
+test("an old config, missing the newer channels, loads without breaking", () => {
   const antiga = {
     voteGoal: 50000, campaignDays: 30,
     channels: { corpoACorpo: { enabled: true, share: 1, conversion: 0.2, params: {} } }, // faltam 6 canais
@@ -262,21 +261,21 @@ test("configuração antiga (sem canais novos) carrega sem quebrar", () => {
   assert.doesNotThrow(() => run(cfg));
 });
 
-test("migrateConfig tolera lixo", () => {
+test("migrateConfig tolerates garbage", () => {
   [null, undefined, 42, "texto", [], {}].forEach((v) => {
     const cfg = migrateConfig(v);
     assert.doesNotThrow(() => run(cfg), `quebrou com ${JSON.stringify(v)}`);
   });
 });
 
-test("deepMerge substitui arrays em vez de mesclar item a item", () => {
+test("deepMerge replaces arrays instead of merging item by item", () => {
   assert.deepEqual(deepMerge({ a: [1, 2, 3] }, { a: [9] }).a, [9]);
   assert.deepEqual(deepMerge({ a: { b: 1, c: 2 } }, { a: { c: 3 } }).a, { b: 1, c: 3 });
 });
 
-/* ---------------------- robustez numérica -------------------------------- */
+/* ---------------------- numeric robustness ------------------------------- */
 
-test("entradas degeneradas não produzem NaN silencioso", () => {
+test("degenerate inputs produce no silent NaN", () => {
   const cfg = defaultConfig();
   const casos = [
     { ...cfg, campaignDays: 0 },
@@ -294,7 +293,7 @@ test("entradas degeneradas não produzem NaN silencioso", () => {
   });
 });
 
-test("canal com conversão zero não contamina o total com NaN", () => {
+test("a channel with zero conversion does not contaminate the total with NaN", () => {
   const cfg = defaultConfig();
   cfg.channels.corpoACorpo.conversion = 0;
   const d = run(cfg);
@@ -302,30 +301,30 @@ test("canal com conversão zero não contamina o total com NaN", () => {
   assert.ok(!Number.isNaN(d.totalContactsNeeded));
 });
 
-test("canal desabilitado com participação > 0 não gera contatos", () => {
+test("a disabled channel with a share > 0 generates no contacts", () => {
   const cfg = defaultConfig();
   cfg.channels.corpoACorpo.enabled = false;
   const d = run(cfg);
   assert.equal(d.totalContactsNeeded, 0);
 });
 
-test("datas do pleito são derivadas do ano, não fixas", () => {
+test("poll dates are derived from the year, not hardcoded", () => {
   assert.deepEqual(electionDates(2026), { primeiroTurno: "2026-10-04", segundoTurno: "2026-10-25" });
   assert.deepEqual(electionDates(2028), { primeiroTurno: "2028-10-01", segundoTurno: "2028-10-29" });
   assert.deepEqual(electionDates(2022), { primeiroTurno: "2022-10-02", segundoTurno: "2022-10-30" });
   assert.equal(electionDates("lixo"), null);
 });
 
-test("ano de referência histórica muda o comparecimento usado", () => {
+test("the historical reference year changes the turnout used", () => {
   const cfg = defaultConfig();
   const a = run({ ...cfg, uf: "MG", histRefYear: 2022 });
   const b = run({ ...cfg, uf: "MG", histRefYear: 2018 });
   assert.notEqual(a.territories[0].comparecimento, b.territories[0].comparecimento);
 });
 
-/* ---------------------- proveniência dos dados --------------------------- */
+/* ---------------------- data provenance ---------------------------------- */
 
-test("todo campo de dado declara uma fonte existente", () => {
+test("every data field declares a source that exists", () => {
   for (const [campo, fonteId] of Object.entries(FONTE_DO_CAMPO)) {
     const f = FONTES[fonteId];
     assert.ok(f, `campo ${campo} aponta para fonte inexistente ${fonteId}`);
@@ -336,7 +335,7 @@ test("todo campo de dado declara uma fonte existente", () => {
   }
 });
 
-test("as 27 UFs têm eleitorado, comparecimento dos dois anos e vagas coerentes", () => {
+test("all 27 states have electorate, turnout for both years and coherent seats", () => {
   assert.equal(UF_DATA.length, 27);
   for (const u of UF_DATA) {
     assert.ok(u.eleitores > 0, `${u.code} sem eleitorado`);
@@ -345,22 +344,22 @@ test("as 27 UFs têm eleitorado, comparecimento dos dois anos e vagas coerentes"
       const c = u.hist[ano]?.comparecimento;
       assert.ok(c > 0.5 && c < 1, `${u.code}/${ano} comparecimento implausível: ${c}`);
     }
-    // CF art. 27: o triplo até 36; acima de 12 federais, +1 estadual por federal.
+    // Constitution art. 27: triple up to 36; past 12 federal seats, +1 state seat each.
     const esperado = u.vagasCamara <= 12 ? u.vagasCamara * 3 : 36 + (u.vagasCamara - 12);
     assert.equal(u.vagasAssembleia, esperado, `${u.code}: vagas de Assembleia fora da regra do art. 27`);
   }
   assert.equal(UF_DATA.reduce((a, u) => a + u.vagasCamara, 0), 513, "a Câmara tem 513 cadeiras em 2026");
 });
 
-test("o comparecimento não segue um padrão sintético entre 2018 e 2022", () => {
-  // A versão anterior tinha 2018 = 2022 + 0,02 para TODAS as UFs, o que é o
-  // carimbo de dado inventado. Com dado real, o delta varia de sinal.
+test("turnout follows no synthetic pattern between 2018 and 2022", () => {
+  // A fixed offset across all 27 states is the signature of invented data:
+  // with real data the delta changes sign.
   const deltas = UF_DATA.map((u) => u.hist[2018].comparecimento - u.hist[2022].comparecimento);
   assert.ok(deltas.some((d) => d > 0) && deltas.some((d) => d < 0),
     "esperava UFs com comparecimento maior e menor em 2018 do que em 2022");
 });
 
-test("trocar o ano de referência muda os votos esperados", () => {
+test("changing the reference year changes the expected votes", () => {
   const cfg = defaultConfig();
   const a = run({ ...cfg, histRefYear: 2022 });
   const b = run({ ...cfg, histRefYear: 2018 });
@@ -369,7 +368,7 @@ test("trocar o ano de referência muda os votos esperados", () => {
   assert.equal(b.anoReferencia, 2018);
 });
 
-test("toda UF tem recorte municipal, não só SP", () => {
+test("every state has a municipal breakdown, not just SP", () => {
   for (const u of UF_DATA) {
     const lista = getMunicipiosDaUf(u.code);
     assert.ok(lista.length > 0, `${u.code} sem municípios detalhados`);
@@ -382,7 +381,7 @@ test("toda UF tem recorte municipal, não só SP", () => {
   }
 });
 
-test("os quatro critérios sem fonte começam neutros e não desempatam nada", () => {
+test("the four sourceless criteria start neutral and break no tie", () => {
   const t = buildTerritories(defaultConfig());
   for (const campo of ["historico", "presenca", "capacidade", "logistica"]) {
     assert.equal(PARAMS_TERRITORIAIS_PADRAO[campo], 0.5);
@@ -391,9 +390,9 @@ test("os quatro critérios sem fonte começam neutros e não desempatam nada", (
   }
 });
 
-/* ---------------------- precisão honesta -------------------------------- */
+/* ---------------------- honest precision --------------------------------- */
 
-test("fmtSig corta a precisão falsa em vez de despejar todos os dígitos", () => {
+test("fmtSig cuts false precision instead of dumping every digit", () => {
   assert.equal(fmtSig(1078431), "1,08 mi");
   assert.equal(fmtSig(161765), "162 mil");
   assert.equal(fmtSig(8), "8");
@@ -404,7 +403,7 @@ test("fmtSig corta a precisão falsa em vez de despejar todos os dígitos", () =
   assert.match(fmtFaixa(781000, 1620000), /781 mil – 1,6 mi/);
 });
 
-test("a simulação devolve faixa para meta, contatos, diária e custo", () => {
+test("the simulation returns a range for goal, contacts, daily target and cost", () => {
   const cfg = defaultConfig();
   const r = runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 800, seed: 42 });
   for (const chave of ["adjustedGoal", "contacts", "daily", "cost"]) {
@@ -415,7 +414,7 @@ test("a simulação devolve faixa para meta, contatos, diária e custo", () => {
   }
 });
 
-test("o custo simulado envolve o custo determinístico", () => {
+test("the simulated cost envelopes the deterministic cost", () => {
   const cfg = defaultConfig();
   const d = run(cfg);
   const r = runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 2000, seed: 42 });
@@ -423,7 +422,7 @@ test("o custo simulado envolve o custo determinístico", () => {
     `custo determinístico ${d.totalCost} fora da faixa ${r.cost.p10}–${r.cost.p90}`);
 });
 
-test("mesma semente, mesma faixa — a simulação é reprodutível", () => {
+test("same seed, same range: the simulation is reproducible", () => {
   const cfg = defaultConfig();
   const b = defaultBounds(cfg);
   const a1 = runMonteCarlo({ cfg, bounds: b, iterations: 500, seed: 7 });
@@ -431,7 +430,7 @@ test("mesma semente, mesma faixa — a simulação é reprodutível", () => {
   assert.deepEqual(a1.contacts, a2.contacts);
 });
 
-test("defaultBounds deriva os limites das premissas do plano", () => {
+test("defaultBounds derives the bounds from the plan's assumptions", () => {
   const b = defaultBounds({ ...defaultConfig(), abstentionRate: 0.30, fidelityRate: 0.70 });
   assert.equal(b.abstentionMin, 0.23);
   assert.equal(b.abstentionMax, 0.37);

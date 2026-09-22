@@ -27,26 +27,25 @@ import {
 function cx(...args) { return args.filter(Boolean).join(" "); }
 
 /* ============================================================================
-   ESTILO — sistema visual próprio (institucional, alta densidade).
-   Contraste: todos os tokens de texto passam em WCAG AA (4.5:1) sobre o fundo
-   em que são efetivamente usados. A versão anterior usava #9096AA (2.9:1) nos
-   rótulos de TODOS os KPIs, e corpos de texto de 9,5px.
+   STYLE — house visual system: institutional, high density.
+   Every text token clears WCAG AA (4.5:1) against the background it is
+   actually used on.
    ========================================================================== */
 
 const STYLE = `
 .fr-app {
-  /* Casco institucional: grafite quase-preto, neutro (croma ~0). */
+  /* Institutional shell: near-black graphite, neutral (chroma ~0). */
   --ink: #191B1F; --ink-2: #26292F; --ink-3: #343841; --ink-line: #2E323A;
-  /* Papel neutro verdadeiro — sem tingimento azulado nem creme. */
+  /* Truly neutral paper: no blue cast, no cream. */
   --paper: #F0F0F1; --card: #FFFFFF; --surface-2: #F7F7F8;
   --line: #DBDBDE; --line-2: #EAEAEC;
   --text: #1A1B1F; --text-soft: #4B4D53; --text-faint: #5E6066;
   --invert: #EDEDEE; --invert-soft: #B8BAC0;
-  /* Latão institucional: a identidade que antes existia só em 3px de --gold. */
+  /* Institutional brass. */
   --brand: #856616; --brand-deep: #634C0F; --brand-soft: #F3ECDA;
   --gold: #D6A93C;
-  /* Proveniência: premissa saiu do âmbar (colidia com a marca) e virou neutra,
-     que é o que ela é — um valor digitado. O âmbar ficou só para avisos. */
+  /* An assumption is a typed-in value, not a warning: it reads neutral, and
+     amber is reserved for actual warnings. */
   --oficial: #1A6B4C; --oficial-ink: #12523A; --oficial-soft: #E2EFE9;
   --historico: #5B4E92; --historico-ink: #4A3E7E; --historico-soft: #EAE7F5;
   --premissa: #565A66; --premissa-ink: #3D414B; --premissa-soft: #ECEDEF;
@@ -123,10 +122,10 @@ const STYLE = `
 .fr-topbar-spacer { flex: 1; }
 .fr-content { padding: 22px 26px 60px; max-width: 1360px; width: 100%; margin: 0 auto; }
 
-/* ---------- blocos genéricos ---------- */
+/* ---------- generic blocks ---------- */
 .fr-section-head { margin-bottom: 16px; }
-/* Era um kicker maiúsculo, tracked e colorido acima de TODAS as 13 views —
-   o andaime mais reproduzido que existe. Vira uma etiqueta discreta. */
+/* A quiet label. A coloured, tracked, uppercase kicker over all 13 views is
+   the most copied scaffold there is. */
 .fr-eyebrow { font-family: var(--font-mono); font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-faint); margin-bottom: 5px; }
 .fr-h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 5px; text-wrap: balance; }
 .fr-h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.005em; margin: 0 0 2px; }
@@ -137,8 +136,8 @@ const STYLE = `
 .fr-grid-3 { grid-template-columns: repeat(3, 1fr); }
 .fr-grid-4 { grid-template-columns: repeat(4, 1fr); }
 .fr-grid-5 { grid-template-columns: repeat(5, 1fr); }
-/* Estes dois substituem os style={{gridTemplateColumns}} inline, que venciam
-   as media queries e mantinham duas colunas espremidas no celular. */
+/* These two replace inline style={{gridTemplateColumns}}, which beat the media
+   queries and kept two cramped columns on a phone. */
 .fr-grid-split { grid-template-columns: 1.3fr 1fr; align-items: start; }
 .fr-grid-half { grid-template-columns: 1fr 1fr; align-items: start; }
 .fr-row { display: flex; align-items: center; gap: 10px; }
@@ -149,7 +148,7 @@ const STYLE = `
 .fr-hint { font-size: 12px; color: var(--text-faint); }
 .fr-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; padding: 2px 0; }
 
-/* ---------- selos de proveniência ----------
+/* ---------- provenance badges ----------
    Etiqueta quadrada, caixa-baixa. "Estimativa" é o valor padrão e aparecia
    8x na mesma tela como pílula colorida: virou texto silencioso com ponto,
    para que só a EXCEÇÃO (histórico, premissa, perigo) carregue marcação. */
@@ -172,7 +171,7 @@ const STYLE = `
 .fr-kpi-value { font-family: var(--font-mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--text); overflow-wrap: anywhere; }
 .fr-kpi-sub { font-size: 12px; color: var(--text-faint); }
 
-/* ---------- proveniência: fonte, método e link ---------- */
+/* ---------- provenance: source, method and link ---------- */
 .fr-info-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; padding: 0; border: 1px solid var(--line);
@@ -230,20 +229,18 @@ const STYLE = `
 }
 .fr-param-input:hover { border-color: #C2C2C6; }
 .fr-th-premissa { color: var(--premissa-ink) !important; }
-/* Nome do território não quebra em três linhas, mas também não monopoliza a
-   largura: passando de 22ch ele elide. O nome completo fica no title. */
+/* The territory name neither wraps over three lines nor monopolises the
+   width: past 22ch it ellipsizes, with the full name in the title. */
 .fr-table td:first-child, .fr-table th:first-child { white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
 .fr-table thead tr:first-child th[colspan] { text-align: center; border-bottom: none; padding-bottom: 2px; }
 
-/* ---------- fórmulas ---------- */
+/* ---------- formulas ---------- */
 .fr-disclosure { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
 .fr-disclosure-btn { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 9px 10px; background: var(--surface-2); border: none; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--brand); font-family: var(--font-sans); }
 .fr-disclosure-body { padding: 10px 12px; font-size: 13px; color: var(--text-soft); background: #fff; border-top: 1px solid var(--line); }
-/* A fórmula quebra em vez de rolar no eixo x: obrigar o usuário a arrastar o
-   bloco para ler o fim da conta escondia justamente a parte que ele foi
-   auditar. A continuação de uma linha quebrada entra recuada (padding-left +
-   text-indent negativo por linha, via .fr-formula-linha) para não se confundir
-   com uma linha nova da fórmula. */
+/* Formulas wrap instead of scrolling sideways: dragging the box hides the very
+   part the user opened it to audit. A wrapped line continues indented, via
+   .fr-formula-linha, so it does not read as a new line of the formula. */
 .fr-formula-box { font-family: var(--font-mono); font-size: 12px; line-height: 1.55; background: var(--ink); color: var(--invert); padding: 10px 12px; border-radius: var(--r-sm); margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .fr-formula-linha { padding-left: 16px; text-indent: -16px; }
 .fr-formula-linha:empty { height: 0.6em; }
@@ -263,11 +260,10 @@ const STYLE = `
 .fr-field-row .fr-num { min-width: 58px; text-align: right; }
 .fr-field-error { font-size: 12px; color: var(--danger-ink); font-weight: 600; }
 
-/* ---------- tabela ---------- */
-/* Densidade: o cabeçalho quebra em duas linhas em vez de esticar a coluna.
-   "Penetração exigida" em linha única empurrava a tabela para fora da tela e
-   obrigava a rolar no eixo x para ler justamente a coluna que importa. Os
-   números é que não quebram — 1.234.567 partido ao meio não se lê. */
+/* ---------- tables ---------- */
+/* Headers wrap over two lines instead of stretching the column: a single-line
+   "Penetração exigida" pushes the table off screen. Numbers do not wrap —
+   1,234,567 split in half is unreadable. */
 .fr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: auto; }
 .fr-table th { text-align: left; font-size: 11.5px; line-height: 1.25; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 500; padding: 5px 7px; border-bottom: 1px solid var(--line); white-space: normal; }
 .fr-table td { padding: 5px 7px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
@@ -278,7 +274,7 @@ const STYLE = `
 .fr-table tr.resto td { background: var(--surface-2); color: var(--text-soft); font-style: normal; }
 .fr-table tfoot td { font-weight: 600; border-top: 1px solid var(--text); }
 
-/* ---------- botões ---------- */
+/* ---------- buttons ---------- */
 .fr-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--r-sm); font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text); font-family: var(--font-sans); transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
 .fr-btn:hover:not(:disabled) { background: var(--surface-2); border-color: #C2C2C6; color: var(--text); }
 .fr-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
@@ -293,14 +289,14 @@ const STYLE = `
 .fr-seg button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
 .fr-seg button.active { background: var(--brand); color: #fff; font-weight: 600; }
 
-/* ---------- alertas ---------- */
+/* ---------- alerts ---------- */
 .fr-alert { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-sm); font-size: 13px; border: 1px solid; }
 .fr-alert.critico { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-ink); }
 .fr-alert.atencao { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
 .fr-alert.info { background: var(--surface-2); border-color: var(--line); color: var(--text-soft); }
 .fr-alert svg { flex: 0 0 auto; margin-top: 1px; }
 
-/* ---------- funil ---------- */
+/* ---------- funnel ---------- */
 .fr-funnel { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; }
 .fr-funnel-stage { position: relative; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: filter 0.15s ease; border: none; padding: 0; min-height: 42px; }
 .fr-funnel-stage:hover:not(.estatico) { filter: brightness(1.12); }
@@ -317,13 +313,13 @@ const STYLE = `
 .fr-struct-card .lbl { font-size: 12px; color: var(--text-faint); font-weight: 400; }
 .fr-struct-card .val { font-family: var(--font-mono); font-weight: 600; font-size: 18px; margin-top: 2px; }
 
-/* ---------- rede ---------- */
+/* ---------- network ---------- */
 .fr-tree-node { flex: 1; text-align: center; padding: 10px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); }
 .fr-tree-node .lbl { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
 .fr-tree-node .val { font-family: var(--font-mono); font-weight: 600; font-size: 15px; margin-top: 3px; }
 .fr-tree-arrow { color: var(--text-faint); flex: 0 0 auto; }
 
-/* ---------- diversos ---------- */
+/* ---------- misc ---------- */
 .fr-scroll-x { overflow-x: auto; }
 .fr-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .fr-chip { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: var(--r-sm); border: 1px solid var(--line); font-size: 12px; cursor: pointer; background: #fff; color: var(--text); font-family: var(--font-sans); }
@@ -336,7 +332,7 @@ const STYLE = `
 .fr-progress-track { height: 8px; background: var(--line-2); border-radius: 0; overflow: hidden; }
 .fr-progress-track { position: relative; }
 .fr-progress-fill { height: 100%; background: var(--brand); transition: width 0.2s ease; }
-/* Trecho hachurado: onde a cobertura cai dependendo da conversão real. */
+/* Hatched stretch: where coverage lands depending on the real conversion. */
 .fr-progress-faixa {
   position: absolute; top: 0; bottom: 0;
   background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px);
@@ -372,18 +368,15 @@ const STYLE = `
 `;
 
 /* ============================================================================
-   MODO DE EXIBIÇÃO — agora é global de verdade.
-   Antes, o toggle "Assessor / Pesquisador" só alterava UMA tela (o Funil), o
-   que escondia a funcionalidade-assinatura do app por trás de um controle não
-   descoberto. Agora ele filtra a navegação e os blocos avançados em todas as
-   views, via contexto.
+   DISPLAY MODE — Advisor / Researcher, via context.
+   It filters navigation and advanced blocks across every view.
    ========================================================================== */
 
 const ModeContext = createContext("pesquisador");
 const useIsResearcher = () => useContext(ModeContext) === "pesquisador";
 
 /* ============================================================================
-   COMPONENTES DE APOIO
+   SUPPORTING COMPONENTS
    ========================================================================== */
 
 const PROV_LABEL = {
@@ -405,11 +398,8 @@ const fmtDataBR = (iso) => {
   return d ? `${d}/${m}/${a}` : `${m}/${a}`;
 };
 
-/**
- * Selo de proveniência. Quando o número vem de um arquivo, `fonte` aponta para
- * a chave em FONTES e o selo passa a carregar órgão, data de referência e link
- * — antes ele dizia apenas "Referência histórica", sem dizer de onde.
- */
+/** Provenance badge. With `fonte` set to a key in FONTES, it also carries the
+ *  agency, the reference date and the link. */
 function ProvBadge({ type, fonte, campo }) {
   const id = fonte || (campo ? FONTE_DO_CAMPO[campo] : null);
   const f = id ? FONTES[id] : null;
@@ -424,7 +414,7 @@ function ProvBadge({ type, fonte, campo }) {
   );
 }
 
-/** Ficha da fonte: órgão, dataset, data de referência, método e link. */
+/** Source card: agency, dataset, reference date, method and link. */
 function Fonte({ id, compacto = false }) {
   const f = FONTES[id];
   if (!f) return null;
@@ -451,11 +441,8 @@ function Fonte({ id, compacto = false }) {
   );
 }
 
-/**
- * Bloco de fórmula. Cada linha vira um elemento próprio para que a quebra
- * automática (telas estreitas) apareça recuada, e não como se fosse mais uma
- * linha da conta.
- */
+/** One element per line, so that a wrap on a narrow screen reads as a
+ *  continuation and not as another line of the formula. */
 function FormulaBox({ children, style }) {
   if (children == null || children === "") return null;
   return (
@@ -467,12 +454,9 @@ function FormulaBox({ children, style }) {
   );
 }
 
-/**
- * Detalhamento de fórmula. Fica disponível nos DOIS modos: esconder a conta
- * atrás do modo Pesquisador deixava o número sem como ser auditado por quem
- * mais precisa confiar nele. O modo Pesquisador continua controlando os blocos
- * avançados (cenários, simulação, proveniência detalhada), não a fórmula.
- */
+/** Formula detail, available in both modes: whoever most needs to trust the
+ *  number must be able to audit it. Researcher mode gates the advanced blocks,
+ *  not the arithmetic. */
 function Formula({ title = "Como este número foi calculado?", formula, variables = [], fonte, children }) {
   const [open, setOpen] = useState(false);
   return (
@@ -502,11 +486,8 @@ function Formula({ title = "Como este número foi calculado?", formula, variable
   );
 }
 
-/**
- * Título de card com a conta atrás de um "i". A fórmula escrita direto no
- * subtítulo custava três linhas de tela para todo mundo, inclusive para quem
- * já a conhece; aqui ela fica a um clique, no mesmo gesto do "i" dos KPIs.
- */
+/** Card title with the arithmetic behind an "i", the same gesture the KPIs
+ *  use. In the subtitle it costs three lines of screen to every reader. */
 function TituloComInfo({ title, rotulo = "Como este número é calculado?", children }) {
   const [open, setOpen] = useState(false);
   return (
@@ -523,17 +504,13 @@ function TituloComInfo({ title, rotulo = "Como este número é calculado?", chil
   );
 }
 
-/** Bloco visível apenas no modo Pesquisador. */
+/** Visible in Researcher mode only. */
 function ResearcherOnly({ children }) {
   return useIsResearcher() ? <>{children}</> : null;
 }
 
-/**
- * Indicador. `formula` e `fonte` são opcionais, mas quando existem o KPI ganha
- * um botão de informação que abre a conta e a origem ali mesmo — sem depender
- * de o usuário achar o bloco de fórmula no fim da tela, nem de estar no modo
- * Pesquisador.
- */
+/** Indicator. Given `formula` or `fonte`, it grows an info button that opens
+ *  the arithmetic and the origin in place. */
 function Kpi({ label, value, sub, prov, tone, formula, variables = [], fonte, nota }) {
   const [open, setOpen] = useState(false);
   const color = tone === "danger" ? "var(--danger-ink)" : tone === "ok" ? "var(--oficial-ink)" : undefined;
@@ -576,14 +553,11 @@ function Kpi({ label, value, sub, prov, tone, formula, variables = [], fonte, no
 }
 
 /**
- * Indicador com FAIXA em vez de número exato.
+ * Indicator shown as a RANGE. A result derived from a guessed 15% door-to-door
+ * conversion does not carry seven significant figures. The central value stays
+ * in the detail panel, for whoever needs a single number to plan with.
  *
- * Um resultado que sai de "15% de conversão no corpo a corpo" — um chute — não
- * merece sete dígitos significativos. "1.078.431 contatos" é uma resposta falsa;
- * "entre 920 mil e 1,3 mi" é a verdadeira. O valor central continua acessível
- * no painel de detalhe, para quem precisa de um número único para planejar.
- *
- * `faixa` é o resumo de percentis vindo do Monte Carlo ({ p10, p50, p90 }).
+ * `faixa` is the percentile summary from the Monte Carlo ({ p10, p50, p90 }).
  */
 function KpiFaixa({ label, faixa, formatar = fmtSig, prov = PROV.ESTIMATIVA, tone, sub, formula, variables = [], nota, exato }) {
   const [open, setOpen] = useState(false);
@@ -647,11 +621,8 @@ function KpiFaixa({ label, faixa, formatar = fmtSig, prov = PROV.ESTIMATIVA, ton
   );
 }
 
-/**
- * Campo numérico com limites REALMENTE aplicados. Os atributos min/max do HTML
- * não impedem digitação; aqui o valor é sanitizado no blur, e o campo aceita
- * estado intermediário vazio sem virar 0 no meio da digitação.
- */
+/** HTML min/max do not stop typing, so the value is sanitized on blur. An
+ *  empty intermediate state is allowed and does not collapse to 0 mid-typing. */
 function NumberField({ label, value, onChange, min, max, step = 1, suffix, prov, hint, id }) {
   const [draft, setDraft] = useState(null);
   const fieldId = useRef(id || uid("num")).current;
@@ -734,12 +705,9 @@ function AlertList({ alerts, empty = "Nenhum alerta ativo para o plano atual." }
   );
 }
 
-/**
- * Trocar de UF invalida tudo o que era específico dela: os municípios
- * priorizados, o município do cargo majoritário e os parâmetros que a equipe
- * informou por território. Sem esse reset, selecionar MG mantinha ids de
- * municípios de SP e o app caía silenciosamente no fallback.
- */
+/** Switching state invalidates everything keyed to the old one: prioritised
+ *  municipalities, the majoritarian office's municipality, and the per-territory
+ *  parameters. Without the reset, stale ids fall through to the fallback. */
 function mudarUf(cfg, uf) {
   const municipios = getMunicipiosDaUf(uf);
   return {
@@ -762,12 +730,8 @@ function SectionHead({ eyebrow, title, desc }) {
 
 const PROV_COLOR = { oficial: "#1A6B4C", historico: "#5B4E92", premissa: "#565A66", estimativa: "#2F5D96" };
 
-/**
- * Diagrama do funil. Só as etapas de VOLUME (pessoas, contatos, ações)
- * dividem a escala visual; as de ESTRUTURA (contagens de configuração) vão
- * para uma grade separada. Antes, "7 segmentos" e "1.078.431 contatos"
- * apareciam como barras da mesma natureza.
- */
+/** Only VOLUME stages (people, contacts, actions) share the visual scale;
+ *  STRUCTURE stages (configuration counts) go to a separate grid. */
 function FunnelDiagram({ stages, onSelect, activeKey }) {
   const volume = stages.filter((s) => s.kind !== "estrutura");
   const estrutura = stages.filter((s) => s.kind === "estrutura");
@@ -783,10 +747,8 @@ function FunnelDiagram({ stages, onSelect, activeKey }) {
           const ratio = Math.sqrt(Math.max(v, maxV * 0.02) / maxV);
           const widthPct = minWidthPct + ratio * (100 - minWidthPct);
           const active = activeKey === s.key;
-          // Sem onSelect a etapa é um gráfico, não um controle. Antes ela saía
-          // como <button aria-pressed="false"> com cursor de mão e brilho no
-          // hover em telas onde o clique não fazia nada — afordância falsa, e
-          // seis botões alternáveis inertes anunciados por leitor de tela.
+          // With no onSelect the stage is a chart, not a control: rendering it
+          // as a button announces six inert toggles to a screen reader.
           const interativo = typeof onSelect === "function";
           const Tag = interativo ? "button" : "div";
           const estilo = {
@@ -858,9 +820,8 @@ function NetworkTree({ trail }) {
 }
 
 /* ============================================================================
-   ERROR BOUNDARY — a versão anterior restaurava a configuração salva sem
-   validação; qualquer incompatibilidade derrubava o app em tela branca, e o
-   único botão de limpeza vivia dentro de uma tela que não renderizava mais.
+   ERROR BOUNDARY — a bad saved config must not leave the user on a white
+   screen with no way to clear it.
    ========================================================================== */
 
 class ErrorBoundary extends React.Component {
@@ -903,13 +864,13 @@ class ErrorBoundary extends React.Component {
 }
 
 /* ============================================================================
-   VIEW: VISÃO GERAL
+   VIEW: OVERVIEW
    ========================================================================== */
 
 function ViewVisaoGeral({ cfg, derived, setActiveView, incerteza }) {
   const d = derived;
-  // Cobertura da capacidade nos dois extremos da simulação: a demanda menor
-  // (P10) é o caso em que a estrutura cobre mais; a maior (P90), em que cobre menos.
+  // Capacity coverage at both ends of the simulation: the lower demand (P10)
+  // is where the structure covers most, the higher (P90) where it covers least.
   const coberturaOtimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p10));
   const coberturaPessimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p90));
   const temRegistro = d.planejado > 0 || d.realizado > 0;
@@ -1088,11 +1049,9 @@ function ViewVisaoGeral({ cfg, derived, setActiveView, incerteza }) {
 }
 
 /* ============================================================================
-   VIEW: META ELEITORAL
-   As entradas agora são ao vivo, como em todas as outras telas. A versão
-   anterior mantinha um estado "pending" separado que desincronizava da barra
-   de contexto — mudar a UF no topo e clicar "Calcular Funil" revertia a
-   mudança.
+   VIEW: ELECTORAL GOAL
+   Inputs are live, as everywhere else: a separate "pending" state desyncs from
+   the context bar.
    ========================================================================== */
 
 function ViewMetaEleitoral({ cfg, update, derived, setActiveView }) {
@@ -1212,7 +1171,7 @@ function ViewMetaEleitoral({ cfg, update, derived, setActiveView }) {
 }
 
 /* ============================================================================
-   VIEW: FUNIL REVERSO
+   VIEW: REVERSE FUNNEL
    ========================================================================== */
 
 function ViewFunilReverso({ cfg, derived, setActiveView }) {
@@ -1362,7 +1321,7 @@ function ViewFunilReverso({ cfg, derived, setActiveView }) {
 }
 
 /* ============================================================================
-   VIEW: TERRITÓRIOS
+   VIEW: TERRITORIES
    ========================================================================== */
 
 const WEIGHT_LABELS = {
@@ -1386,7 +1345,7 @@ function ViewTerritorios({ cfg, update, derived }) {
     update({ territoriosSelecionados: sel.length ? sel : cfg.territoriosSelecionados });
   };
   const setWeight = (key, v) => update({ territorialWeights: { ...cfg.territorialWeights, [key]: v } });
-  /** Os quatro critérios sem fonte pública. Guardados por território em cfg. */
+  /** The four sourceless criteria, stored per territory in cfg. */
   const setParam = (id, campo, valor) => update({
     territorioParams: {
       ...(cfg.territorioParams || {}),
@@ -1641,9 +1600,9 @@ function ViewTerritorios({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: PÚBLICOS
-   Os selos "Dado oficial" desta tela foram trocados: nada aqui vem de conector
-   oficial. Rotular dado sintético como oficial violava a regra central do app.
+   VIEW: AUDIENCES
+   Nothing here comes from an official connector, so nothing here carries the
+   "official data" badge.
    ========================================================================== */
 
 function ViewPublicos({ cfg, update, derived }) {
@@ -1763,7 +1722,7 @@ function ViewPublicos({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: CANAIS
+   VIEW: CHANNELS
    ========================================================================== */
 
 const ICONS = { Handshake, UsersRound, Footprints, DoorOpen, PartyPopper, Smartphone, MessageSquare };
@@ -1905,7 +1864,7 @@ function ViewCanais({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: EQUIPES
+   VIEW: TEAMS
    ========================================================================== */
 
 function ViewEquipes({ cfg, update, derived }) {
@@ -1986,8 +1945,8 @@ function ViewEquipes({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: AGENDA — os campos "dias de rua / digitais / eventos" agora alimentam
-   a capacidade acumulada e o orçamento. Antes eram controles mortos.
+   VIEW: SCHEDULE — street / digital / event days feed accumulated capacity
+   and the budget.
    ========================================================================== */
 
 function ViewAgenda({ cfg, update, derived }) {
@@ -2054,7 +2013,7 @@ function ViewAgenda({ cfg, update, derived }) {
   );
 }
 
-/** Datas derivadas do ano do pleito, não mais um texto fixo de 2026. */
+/** Dates derived from the election year. */
 function CalendarioEleitoral({ cfg, update, derived }) {
   const datas = electionDates(cfg.eleicaoAno);
   const fmtData = (iso) => (iso ? new Date(`${iso}T12:00:00Z`).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }) : "—");
@@ -2089,7 +2048,7 @@ function CalendarioEleitoral({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: ORÇAMENTO
+   VIEW: BUDGET
    ========================================================================== */
 
 function ViewOrcamento({ cfg, update, derived }) {
@@ -2162,10 +2121,10 @@ function ViewOrcamento({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: CENÁRIOS
+   VIEW: SCENARIOS
    ========================================================================== */
 
-/** Mostra o valor que o cenário ativo produz e o quanto ele desloca a premissa. */
+/** What the active scenario produces, and how far it moves the assumption. */
 function DeltaCenario({ rotulo, base, valor, pct = false, multiplicador = false }) {
   const delta = valor - base;
   const neutro = Math.abs(delta) < 1e-9;
@@ -2325,17 +2284,13 @@ function ViewCenarios({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   VIEW: SIMULAÇÕES — Monte Carlo sobre o funil completo.
-   Correções: (1) roda o mix de canais configurado em vez de uma taxa média
-   única; (2) valida min < max e mostra a moda usada; (3) exibe um histograma
-   de verdade, não sete barras de percentil disfarçadas de distribuição;
-   (4) os limites acompanham a configuração atual.
+   VIEW: SIMULATIONS — Monte Carlo over the complete funnel, running the
+   configured channel mix and tracking the current configuration.
    ========================================================================== */
 
 function ViewSimulacoes({ cfg, derived }) {
   const [bounds, setBounds] = useState(() => defaultBounds(cfg));
-  // O botão "Resincronizar" só faz sentido quando os limites já divergiram do
-  // plano; antes ele ficava sempre habilitado e clicá-lo não produzia nada.
+  // "Resync" only means anything once the bounds have drifted from the plan.
   const boundsSincronizados = useMemo(() => {
     const alvo = defaultBounds(cfg);
     return Object.keys(alvo).every((k) => Math.abs((bounds[k] ?? 0) - alvo[k]) < 1e-9);
@@ -2344,8 +2299,8 @@ function ViewSimulacoes({ cfg, derived }) {
   const [running, setRunning] = useState(false);
   const [staleSince, setStaleSince] = useState(false);
 
-  // Os limites eram congelados na montagem: mudar a abstenção na barra de
-  // contexto depois não os atualizava. Agora o app avisa e oferece resincronizar.
+  // Bounds are captured on mount, so a later change to abstention in the
+  // context bar leaves them stale: warn and offer to resync.
   useEffect(() => { setStaleSince(true); }, [cfg.abstentionRate, cfg.fidelityRate]);
 
   const erros = [];
@@ -2499,10 +2454,8 @@ function ViewSimulacoes({ cfg, derived }) {
 }
 
 /* ============================================================================
-   VIEW: DADOS — o registro declara, indicador por indicador, o arquivo de onde
-   o número veio, a data de referência e como foi apurado. A versão anterior
-   marcava "Eleitorado por UF" como oficial enquanto usava uma tabela inventada
-   no código, com erros de até 9 pontos percentuais no comparecimento.
+   VIEW: DATA — per indicator, the file the number came from, its reference
+   date and how it was measured.
    ========================================================================== */
 
 const DATA_SOURCE_REGISTRY = [
@@ -2672,9 +2625,8 @@ function ViewDados({ derived }) {
 }
 
 /* ============================================================================
-   VIEW: RELATÓRIOS — exportação, modelos salvos e rastreamento operacional.
-   O log agora vive no App (não mais só nesta tela), porque a Visão Geral
-   depende dele.
+   VIEW: REPORTS — export, saved templates and the operational log. The log
+   lives in App, not here, because the Overview reads it too.
    ========================================================================== */
 
 function downloadBlob(filename, content, mime) {
@@ -2717,9 +2669,8 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
     setModels([]); setLog([]); onResetConfig();
   };
 
-  // Exportar não dava sinal nenhum: o arquivo baixava em silêncio e, se o
-  // navegador guardasse na pasta de downloads sem avisar, o clique parecia
-  // não ter feito nada. Agora cada exportação confirma nome e tamanho.
+  // A silent download looks like a dead button when the browser files it away
+  // without asking, so each export confirms name and size.
   const [ultimoArquivo, setUltimoArquivo] = useState(null);
   const confirmar = (r) => setUltimoArquivo({ ...r, em: new Date() });
 
@@ -2939,12 +2890,9 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
 }
 
 /* ============================================================================
-   CARD: regras jurídico-eleitorais.
-   Proporcional reescrito: quociente eleitoral -> quociente partidário ->
-   sobras por maiores médias com o filtro de 80% do QE (Lei 14.211/2021), mais
-   o ranking interno da legenda. A versão anterior aplicava D'Hondt puro sobre
-   todas as vagas e exibia, lado a lado e sem reconciliação, um QP de 2 e uma
-   alocação de 7 cadeiras para a mesma legenda.
+   CARD: electoral law rules.
+   Electoral quotient -> party quotient -> leftovers by highest averages with
+   the 80%-of-QE filter (Law 14.211/2021), plus the party's internal ranking.
    ========================================================================== */
 
 function OfficeRulesCard({ cfg, update, derived }) {
@@ -3200,7 +3148,7 @@ function OfficeRulesCard({ cfg, update, derived }) {
 }
 
 /* ============================================================================
-   NAVEGAÇÃO — o modo de exibição agora filtra de verdade a navegação.
+   NAVIGATION
    ========================================================================== */
 
 const NAV_ITEMS = [
@@ -3331,7 +3279,7 @@ function TopContextBar({ cfg, update, derived, onOpenMobile, history }) {
    APP
    ========================================================================== */
 
-/** Lê a view atual do hash da URL (#/territorios), se for uma view válida. */
+/** Reads the current view from the URL hash (#/territorios), if it is valid. */
 function viewFromHash() {
   if (typeof window === "undefined" || !window.location) return null;
   const id = String(window.location.hash || "").replace(/^#\/?/, "");
@@ -3348,7 +3296,7 @@ function writeLocal(key, value) {
   try { window.localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
-/** Estado com histórico de desfazer/refazer. */
+/** State with undo/redo history. */
 function useHistoryState(initial, limit = 60) {
   const [state, setState] = useState(() => ({
     past: [], present: typeof initial === "function" ? initial() : initial, future: [],
@@ -3384,8 +3332,7 @@ export default function App() {
   const hist = useHistoryState(() => migrateConfig(readLocal(STORAGE_KEYS.lastConfig, null)));
   const cfg = hist.value;
 
-  // Roteamento por hash: a versão anterior não tinha rota nenhuma — não dava
-  // para compartilhar um link de uma tela nem usar o botão "voltar".
+  // Hash routing, so a screen can be linked to and the back button works.
   const [mode, setMode] = useState(() => {
     const saved = readLocal(STORAGE_KEYS.mode, null);
     return saved === "assessor" || saved === "pesquisador" ? saved : "pesquisador";
@@ -3418,10 +3365,9 @@ export default function App() {
 
   useEffect(() => { writeLocal(STORAGE_KEYS.mode, mode); }, [mode]);
 
-  // Se o modo atual esconde a tela pedida (um link salvo para #/simulacoes
-  // aberto no modo Assessor, por exemplo), a tela válida é resolvida DURANTE a
-  // renderização. Resolver isso num useEffect fazia a tela errada aparecer por
-  // um frame antes de ser trocada.
+  // When the current mode hides the requested view (a saved #/simulacoes link
+  // opened in Advisor mode), the fallback is resolved during render: doing it
+  // in an effect flashes the wrong screen for a frame.
   const effectiveView = navForMode(mode).some((i) => i.id === activeView) ? activeView : "visao-geral";
 
   useEffect(() => {
@@ -3461,9 +3407,8 @@ export default function App() {
   }), [log]);
 
   const derived = useMemo(() => computeAll(cfg, tracking), [cfg, tracking]);
-  // A faixa de incerteza deixou de ser um extra da aba Simulações: ela é o que
-  // a Visão Geral mostra. 3.000 iterações rodam em ~40 ms, então recalcular a
-  // cada mudança de premissa é barato. Semente fixa = resultado reprodutível.
+  // 3,000 iterations run in ~40 ms, so recomputing on every assumption change
+  // is cheap. Fixed seed, so the same configuration gives the same range.
   const incerteza = useMemo(
     () => runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 3000, seed: 42 }),
     [cfg],

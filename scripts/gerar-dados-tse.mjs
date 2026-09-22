@@ -1,4 +1,4 @@
-/* Gera src/dados-tse.js a partir dos arquivos originais do TSE. */
+/* Generates src/dados-tse.js from the original TSE files. */
 import { execSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 
@@ -12,12 +12,12 @@ const NOME = { AC:"Acre",AL:"Alagoas",AM:"Amazonas",AP:"Amapá",BA:"Bahia",CE:"C
   ES:"Espírito Santo",GO:"Goiás",MA:"Maranhão",MG:"Minas Gerais",MS:"Mato Grosso do Sul",MT:"Mato Grosso",
   PA:"Pará",PB:"Paraíba",PE:"Pernambuco",PI:"Piauí",PR:"Paraná",RJ:"Rio de Janeiro",RN:"Rio Grande do Norte",
   RO:"Rondônia",RR:"Roraima",RS:"Rio Grande do Sul",SC:"Santa Catarina",SE:"Sergipe",SP:"São Paulo",TO:"Tocantins" };
-/* Distribuição mantida pelo STF (ADI 7.362 / out. 2025) para o pleito de 2026. */
+/* Apportionment kept by the STF (ADI 7.362, Oct 2025) for the 2026 election. */
 const VAGAS_CAMARA = { SP:70, MG:53, RJ:46, BA:39, RS:31, PR:30, PE:25, CE:22, MA:18, PA:17, GO:17, SC:16,
   PB:12, ES:10, PI:10, AL:9, RN:8, MT:8, AM:8, DF:8, MS:8, SE:8, RO:8, TO:8, AC:8, AP:8, RR:8 };
 
-/** CF art. 27: o triplo da representação na Câmara até 36; acima de 12 federais,
- *  acrescenta-se um estadual por federal excedente. */
+/** Constitution art. 27: triple the Chamber delegation up to 36; past 12
+ *  federal seats, one state seat per additional federal seat. */
 const vagasAssembleia = (federais) => (federais <= 12 ? federais * 3 : 36 + (federais - 12));
 
 const sh = (cmd) => execSync(cmd, { cwd: SP, maxBuffer: 1 << 30, shell: "/bin/bash" }).toString();
@@ -61,7 +61,7 @@ const c18 = comparecimento("det2018.zip", 2018);
 const r4 = (x) => Math.round(x * 10000) / 10000;
 const slug = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-/* ---------- UF ---------- */
+/* ---------- states ---------- */
 const ufs = UFS.map((uf) => {
   const lista = [...mun.values()].filter((m) => m.uf === uf);
   const eleitores = lista.reduce((a, m) => a + m.eleitores, 0);
@@ -74,7 +74,7 @@ const ufs = UFS.map((uf) => {
             2018: { aptos: a18.aptos, comparecimento: r4(a18.comp / a18.aptos) } } };
 }).sort((a, b) => b.eleitores - a.eleitores);
 
-/* ---------- municípios: os 12 maiores de cada UF ---------- */
+/* ---------- municipalities: the 12 largest of each state ---------- */
 const TOPO = 12;
 const porUf = {};
 for (const uf of UFS) {
@@ -102,16 +102,16 @@ const linhaMun = (m) => `    { id: ${j(m.id)}, cdTse: ${j(m.cdTse)}, name: ${j(m
 
 const hoje = "2026-09-15";
 const cabecalho = `/**
- * ARQUIVO GERADO AUTOMATICAMENTE — não edite à mão.
+ * GENERATED FILE — do not edit by hand.
  *
- * Gerado por scripts/gerar-dados-tse.mjs a partir dos arquivos originais do
- * Portal de Dados Abertos do TSE, em ${hoje}. Cada número aqui tem origem
- * rastreável: nenhum valor foi estimado, arredondado "a olho" ou inventado.
+ * Written by scripts/gerar-dados-tse.mjs from the TSE open data files on ${hoje}.
+ * Every number here is traceable to a source: none was estimated, eyeballed
+ * or invented.
  *
- * O que NÃO está neste arquivo, por não existir fonte pública: desempenho
- * histórico da candidatura, presença de campanha, capacidade instalada e
- * dificuldade logística por território. Esses quatro são julgamentos da equipe
- * e entram como PREMISSA editável (ver PARAMS_TERRITORIAIS_PADRAO em engine.js).
+ * Absent from this file for lack of a public source: the candidacy's
+ * historical performance, campaign presence, installed capacity and
+ * logistical difficulty per territory. Those four are team judgement and
+ * enter as editable assumptions (see PARAMS_TERRITORIAIS_PADRAO in engine.js).
  */
 
 export const FONTES = {
@@ -180,7 +180,7 @@ export const FONTES = {
   },
 };
 
-/** De qual fonte vem cada campo dos dados territoriais. */
+/** Which source each territorial data field comes from. */
 export const FONTE_DO_CAMPO = {
   eleitores: "ELEITORADO_2026",
   municipios: "ELEITORADO_2026",
@@ -191,10 +191,10 @@ export const FONTE_DO_CAMPO = {
   comparecimento2018: "COMPARECIMENTO_2018",
 };
 
-/** Anos de referência histórica disponíveis. */
+/** Available historical reference years. */
 export const ANOS_REFERENCIA = [2022, 2018];
 
-/** Eleitorado nacional apurado (27 UFs; não inclui o exterior). */
+/** National electorate as counted (27 states; excludes voters abroad). */
 export const ELEITORADO_NACIONAL = ${ufs.reduce((a, u) => a + u.eleitores, 0)};
 `;
 
@@ -204,8 +204,8 @@ ${ufs.map(linhaUf).join("\n")}
 ];
 
 /**
- * Os 12 maiores municípios de cada UF, por eleitorado. Não é o estado inteiro:
- * o que sobra entra como "Restante do estado" no cálculo territorial.
+ * The 12 largest municipalities of each state by electorate. Not the whole
+ * state: the remainder enters as "rest of the state" in the territorial split.
  */
 export const MUNICIPIOS_POR_UF = {
 ${UFS.map((uf) => `  ${uf}: [\n${porUf[uf].map(linhaMun).join("\n")}\n  ],`).join("\n")}
