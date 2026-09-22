@@ -5,7 +5,7 @@ import {
   AlertTriangle, CheckCircle2, Download, Save, Plus,
   Menu, RefreshCw, Handshake, Footprints, DoorOpen, PartyPopper, Smartphone,
   MessageSquare, UsersRound, X, ArrowRight, GitBranch, ShieldCheck,
-  Undo2, Redo2, RotateCcw, Trash2, Lock,
+  Undo2, Redo2, RotateCcw, Trash2, Lock, ExternalLink,
 } from "lucide-react";
 import {
   ResponsiveContainer, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -13,8 +13,11 @@ import {
   ReferenceLine, BarChart,
 } from "recharts";
 import {
-  clamp01, safeDiv, isFiniteNum, fmtInt, fmtDec, fmtPct, fmtMoney, fmtSigned, uid,
-  PROV, UF_DATA, SP_MUNICIPIOS, OFFICES, CHANNEL_DEFS, FUNNEL_STAGES_META,
+  clamp01, safeDiv, isFiniteNum, fmtInt, fmtDec, fmtPct, fmtMoney, fmtSigned, fmtSig, fmtFaixa, uid,
+  defaultBounds,
+  PROV, UF_DATA, OFFICES, CHANNEL_DEFS, FUNNEL_STAGES_META,
+  FONTES, FONTE_DO_CAMPO, PROV_DO_CAMPO, ANOS_REFERENCIA, ELEITORADO_NACIONAL,
+  getMunicipiosDaUf, getParamsTerritorio, PARAMS_TERRITORIAIS_CAMPOS,
   FAIXAS_ETARIAS_PADRAO, TEMATICAS_SUGERIDAS, SCENARIO_PRESETS, STORAGE_KEYS,
   SOBRAS_PARTY_THRESHOLD,
   defaultConfig, migrateConfig, computeAll, computeScenarioSummary, runMonteCarlo,
@@ -32,20 +35,28 @@ function cx(...args) { return args.filter(Boolean).join(" "); }
 
 const STYLE = `
 .fr-app {
-  --ink: #10162B; --ink-2: #1A2340; --ink-3: #2B3560; --ink-line: #34406E;
-  --paper: #F2F3F6; --card: #FFFFFF; --line: #D7DBE3; --line-2: #E7EAF0;
-  --text: #14182B; --text-soft: #4C5468; --text-faint: #5E6679;
-  --invert: #EDEFF7; --invert-soft: #C3C9DE;
-  --brand: #21418F; --brand-deep: #16305F; --brand-soft: #E7ECF9;
-  --gold: #AD8324;
-  --oficial: #187A56; --oficial-ink: #106143; --oficial-soft: #E1F3EB;
-  --historico: #6A5AA8; --historico-ink: #574896; --historico-soft: #ECE7F8;
-  --premissa: #B9821F; --premissa-ink: #7E5710; --premissa-soft: #F8EFD9;
-  --estimativa: #3D6BA8; --estimativa-ink: #2F5688; --estimativa-soft: #E6EDF7;
-  --danger: #B3271E; --danger-ink: #96201A; --danger-soft: #FBE8E6;
+  /* Casco institucional: grafite quase-preto, neutro (croma ~0). */
+  --ink: #191B1F; --ink-2: #26292F; --ink-3: #343841; --ink-line: #2E323A;
+  /* Papel neutro verdadeiro — sem tingimento azulado nem creme. */
+  --paper: #F0F0F1; --card: #FFFFFF; --surface-2: #F7F7F8;
+  --line: #DBDBDE; --line-2: #EAEAEC;
+  --text: #1A1B1F; --text-soft: #4B4D53; --text-faint: #5E6066;
+  --invert: #EDEDEE; --invert-soft: #B8BAC0;
+  /* Latão institucional: a identidade que antes existia só em 3px de --gold. */
+  --brand: #856616; --brand-deep: #634C0F; --brand-soft: #F3ECDA;
+  --gold: #D6A93C;
+  /* Proveniência: premissa saiu do âmbar (colidia com a marca) e virou neutra,
+     que é o que ela é — um valor digitado. O âmbar ficou só para avisos. */
+  --oficial: #1A6B4C; --oficial-ink: #12523A; --oficial-soft: #E2EFE9;
+  --historico: #5B4E92; --historico-ink: #4A3E7E; --historico-soft: #EAE7F5;
+  --premissa: #565A66; --premissa-ink: #3D414B; --premissa-soft: #ECEDEF;
+  --estimativa: #2F5D96; --estimativa-ink: #274E7E; --estimativa-soft: #E6EDF6;
+  --warn: #9A7413; --warn-ink: #6F540D; --warn-soft: #F8EFD6; --warn-line: #E0CB93;
+  --danger: #A62B21; --danger-ink: #8A241C; --danger-soft: #FAE9E7; --danger-line: #E5BCB7;
   --font-sans: 'IBM Plex Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  --r-sm: 3px; --r-md: 6px;
+  /* Geometria de instrumento: quase reta, nada arredondado. */
+  --r-sm: 2px; --r-md: 3px;
   font-family: var(--font-sans);
   color: var(--text);
   background: var(--paper);
@@ -53,7 +64,7 @@ const STYLE = `
   min-height: 100vh;
   display: flex;
   position: relative;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .fr-app, .fr-app * { box-sizing: border-box; }
 .fr-app *:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 2px; }
@@ -71,42 +82,42 @@ const STYLE = `
   display: flex; flex-direction: column; z-index: 20;
 }
 .fr-brand-block { padding: 20px 18px 16px; border-bottom: 1px solid var(--ink-line); }
-.fr-brand-name { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--invert); }
-.fr-brand-sub { font-size: 11.5px; color: var(--invert-soft); margin-top: 6px; line-height: 1.4; }
+.fr-brand-name { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: none; color: var(--invert); }
+.fr-brand-sub { font-size: 12px; color: var(--invert-soft); margin-top: 6px; line-height: 1.45; }
 .fr-nav { flex: 1; padding: 10px; overflow-y: auto; }
 .fr-nav-item {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   padding: 9px 10px; border-radius: var(--r-sm); border: none; background: transparent;
-  color: var(--invert-soft); font-family: var(--font-sans); font-size: 12.5px; font-weight: 500;
+  color: var(--invert-soft); font-family: var(--font-sans); font-size: 13px; font-weight: 400;
   cursor: pointer; margin-bottom: 2px; transition: background 0.12s ease, color 0.12s ease;
   position: relative;
 }
 .fr-nav-item:hover { background: var(--ink-2); color: #fff; }
-.fr-nav-item.active { background: var(--ink-2); color: #fff; }
+.fr-nav-item.active { background: var(--ink-2); color: #fff; font-weight: 600; }
 .fr-nav-item.active::before {
   content: ""; position: absolute; left: -10px; top: 6px; bottom: 6px; width: 3px;
-  background: var(--gold); border-radius: 0 2px 2px 0;
+  background: var(--gold); border-radius: 0;
 }
 .fr-nav-item svg { flex: 0 0 auto; }
 .fr-sidebar-foot { padding: 12px 18px 16px; border-top: 1px solid var(--ink-line); }
 .fr-mode-toggle { display: flex; background: var(--ink-2); border-radius: var(--r-sm); padding: 3px; gap: 2px; }
-.fr-mode-btn { flex: 1; padding: 7px 4px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; border: none; background: transparent; color: var(--invert-soft); border-radius: 3px; cursor: pointer; font-family: var(--font-sans); }
+.fr-mode-btn { flex: 1; padding: 7px 4px; font-size: 12px; font-weight: 600; letter-spacing: 0; border: none; background: transparent; color: var(--invert-soft); border-radius: var(--r-sm); cursor: pointer; font-family: var(--font-sans); }
 .fr-mode-btn.active { background: var(--brand); color: #fff; }
-.fr-mode-note { font-size: 11px; color: var(--invert-soft); margin-top: 8px; line-height: 1.35; }
+.fr-mode-note { font-size: 11px; color: var(--invert-soft); margin-top: 8px; line-height: 1.4; }
 
 /* ---------- main / topbar ---------- */
 .fr-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .fr-topbar {
-  position: sticky; top: 0; z-index: 15; background: var(--card); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 15; background: var(--surface-2); border-bottom: 1px solid var(--line);
   padding: 10px 22px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .fr-ctx-pill {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line);
-  border-radius: var(--r-sm); background: var(--paper); font-size: 12px; color: var(--text-soft);
+  border-radius: var(--r-sm); background: var(--card); font-size: 12px; color: var(--text-soft);
 }
-.fr-ctx-pill label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); font-weight: 600; }
+.fr-ctx-pill label { font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
 .fr-ctx-pill select, .fr-ctx-pill input {
-  border: none; background: transparent; font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+  border: none; background: transparent; font-family: var(--font-mono); font-size: 13px; font-weight: 600;
   color: var(--text); cursor: pointer;
 }
 .fr-topbar-spacer { flex: 1; }
@@ -114,10 +125,12 @@ const STYLE = `
 
 /* ---------- blocos genéricos ---------- */
 .fr-section-head { margin-bottom: 16px; }
-.fr-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); margin-bottom: 4px; }
-.fr-h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 4px; }
-.fr-h2 { font-size: 15px; font-weight: 700; margin: 0 0 2px; }
-.fr-desc { font-size: 12.5px; color: var(--text-soft); max-width: 680px; }
+/* Era um kicker maiúsculo, tracked e colorido acima de TODAS as 13 views —
+   o andaime mais reproduzido que existe. Vira uma etiqueta discreta. */
+.fr-eyebrow { font-family: var(--font-mono); font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-faint); margin-bottom: 5px; }
+.fr-h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 5px; text-wrap: balance; }
+.fr-h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.005em; margin: 0 0 2px; }
+.fr-desc { font-size: 13px; color: var(--text-soft); max-width: 680px; text-wrap: pretty; }
 .fr-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px 18px; }
 .fr-grid { display: grid; gap: 14px; }
 .fr-grid-2 { grid-template-columns: repeat(2, 1fr); }
@@ -132,12 +145,15 @@ const STYLE = `
 .fr-row-wrap { flex-wrap: wrap; }
 .fr-between { justify-content: space-between; }
 .fr-stack { display: flex; flex-direction: column; gap: 14px; }
-.fr-divider { height: 1px; background: var(--line); margin: 14px 0; border: none; }
-.fr-hint { font-size: 11.5px; color: var(--text-faint); }
-.fr-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12.5px; padding: 2px 0; }
+.fr-divider { height: 1px; background: var(--line-2); margin: 14px 0; border: none; }
+.fr-hint { font-size: 12px; color: var(--text-faint); }
+.fr-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; padding: 2px 0; }
 
-/* ---------- selos de proveniência ---------- */
-.fr-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
+/* ---------- selos de proveniência ----------
+   Etiqueta quadrada, caixa-baixa. "Estimativa" é o valor padrão e aparecia
+   8x na mesma tela como pílula colorida: virou texto silencioso com ponto,
+   para que só a EXCEÇÃO (histórico, premissa, perigo) carregue marcação. */
+.fr-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; padding: 2px 7px; border-radius: var(--r-sm); white-space: nowrap; }
 .fr-badge .dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
 .fr-badge.oficial { background: var(--oficial-soft); color: var(--oficial-ink); }
 .fr-badge.oficial .dot { background: var(--oficial); }
@@ -145,99 +161,186 @@ const STYLE = `
 .fr-badge.historico .dot { background: var(--historico); }
 .fr-badge.premissa { background: var(--premissa-soft); color: var(--premissa-ink); }
 .fr-badge.premissa .dot { background: var(--premissa); }
-.fr-badge.estimativa { background: var(--estimativa-soft); color: var(--estimativa-ink); }
+.fr-badge.estimativa { background: transparent; color: var(--text-faint); font-weight: 400; padding: 2px 0; }
 .fr-badge.estimativa .dot { background: var(--estimativa); }
 .fr-badge.perigo { background: var(--danger-soft); color: var(--danger-ink); }
 .fr-badge.perigo .dot { background: var(--danger); }
 
 /* ---------- kpi ---------- */
 .fr-kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.fr-kpi-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
-.fr-kpi-value { font-family: var(--font-mono); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; }
-.fr-kpi-sub { font-size: 11.5px; color: var(--text-soft); }
+.fr-kpi-label { font-size: 13px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-soft); }
+.fr-kpi-value { font-family: var(--font-mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--text); overflow-wrap: anywhere; }
+.fr-kpi-sub { font-size: 12px; color: var(--text-faint); }
+
+/* ---------- proveniência: fonte, método e link ---------- */
+.fr-info-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--card); color: var(--text-faint);
+  cursor: pointer; flex: 0 0 auto; transition: border-color 0.12s ease, color 0.12s ease;
+}
+.fr-info-btn:hover, .fr-info-btn[aria-expanded="true"] { border-color: var(--brand); color: var(--brand); }
+.fr-link-btn {
+  border: none; background: none; padding: 0; font: inherit; color: var(--brand);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.fr-link-btn:hover { color: var(--brand-deep); }
+.fr-export-status {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--surface-2); font-size: 12px; min-height: 34px;
+  display: flex; align-items: center;
+}
+.fr-export-ok { display: inline-flex; align-items: center; gap: 7px; color: var(--oficial-ink); }
+.fr-export-ok svg { flex: 0 0 auto; }
+.fr-cenario-efeito {
+  margin-top: 14px; padding: 12px 14px; border: 1px solid var(--brand);
+  border-radius: var(--r-md); background: var(--brand-soft); font-size: 13px;
+}
+.fr-cenario-efeito .fr-hint { color: var(--brand-deep); }
+.fr-kpi-faixa {
+  font-family: var(--font-mono); font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
+  line-height: 1.25; color: var(--text); white-space: nowrap;
+}
+.fr-kpi-faixa .ate { color: var(--text-faint); font-weight: 400; padding: 0 3px; }
+@media (max-width: 1240px) { .fr-export-status {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--surface-2); font-size: 12px; min-height: 34px;
+  display: flex; align-items: center;
+}
+.fr-export-ok { display: inline-flex; align-items: center; gap: 7px; color: var(--oficial-ink); }
+.fr-export-ok svg { flex: 0 0 auto; }
+.fr-cenario-efeito {
+  margin-top: 14px; padding: 12px 14px; border: 1px solid var(--brand);
+  border-radius: var(--r-md); background: var(--brand-soft); font-size: 13px;
+}
+.fr-cenario-efeito .fr-hint { color: var(--brand-deep); }
+.fr-kpi-faixa { font-size: 15px; } }
+.fr-kpi-detalhe { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-2); font-size: 12px; color: var(--text-soft); }
+.fr-fonte { font-size: 12px; color: var(--text-soft); }
+.fr-fonte-linha { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid var(--line-2); }
+.fr-fonte-linha:last-of-type { border-bottom: none; }
+.fr-fonte-linha span { color: var(--text-faint); }
+.fr-fonte-linha b { text-align: right; font-weight: 500; color: var(--text); }
+.fr-fonte-metodo { margin-top: 8px; padding: 8px 10px; background: var(--surface-2); border-radius: var(--r-sm); line-height: 1.5; }
+.fr-app a { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
+.fr-app a:hover { color: var(--brand-deep); }
+.fr-param-input {
+  width: 46px; font-family: var(--font-mono); font-size: 12px; padding: 3px 5px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff; color: var(--text); text-align: right;
+}
+.fr-param-input:hover { border-color: #C2C2C6; }
+.fr-th-premissa { color: var(--premissa-ink) !important; }
+/* Nome do território não quebra em três linhas, mas também não monopoliza a
+   largura: passando de 22ch ele elide. O nome completo fica no title. */
+.fr-table td:first-child, .fr-table th:first-child { white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
+.fr-table thead tr:first-child th[colspan] { text-align: center; border-bottom: none; padding-bottom: 2px; }
 
 /* ---------- fórmulas ---------- */
-.fr-disclosure { border: 1px dashed var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.fr-disclosure-btn { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 9px 10px; background: var(--paper); border: none; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--brand); font-family: var(--font-sans); }
-.fr-disclosure-body { padding: 10px 12px; font-size: 12.5px; color: var(--text-soft); background: #fff; border-top: 1px dashed var(--line); }
-.fr-formula-box { font-family: var(--font-mono); font-size: 12px; background: var(--ink); color: var(--invert); padding: 10px 12px; border-radius: var(--r-sm); margin: 6px 0; overflow-x: auto; white-space: pre; }
+.fr-disclosure { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
+.fr-disclosure-btn { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 9px 10px; background: var(--surface-2); border: none; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--brand); font-family: var(--font-sans); }
+.fr-disclosure-body { padding: 10px 12px; font-size: 13px; color: var(--text-soft); background: #fff; border-top: 1px solid var(--line); }
+/* A fórmula quebra em vez de rolar no eixo x: obrigar o usuário a arrastar o
+   bloco para ler o fim da conta escondia justamente a parte que ele foi
+   auditar. A continuação de uma linha quebrada entra recuada (padding-left +
+   text-indent negativo por linha, via .fr-formula-linha) para não se confundir
+   com uma linha nova da fórmula. */
+.fr-formula-box { font-family: var(--font-mono); font-size: 12px; line-height: 1.55; background: var(--ink); color: var(--invert); padding: 10px 12px; border-radius: var(--r-sm); margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fr-formula-linha { padding-left: 16px; text-indent: -16px; }
+.fr-formula-linha:empty { height: 0.6em; }
 
 /* ---------- inputs ---------- */
 .fr-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.fr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text); }
+.fr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
 .fr-field input[type=number], .fr-field input[type=text], .fr-field input[type=date], .fr-field select, .fr-input {
   font-family: var(--font-mono); font-size: 13px; padding: 7px 9px; border: 1px solid var(--line);
   border-radius: var(--r-sm); background: #fff; color: var(--text); width: 100%; min-width: 0;
 }
+.fr-field input:hover, .fr-field select:hover, .fr-input:hover { border-color: #C2C2C6; }
 .fr-input.text { font-family: var(--font-sans); }
 .fr-field input[type=range] { width: 100%; accent-color: var(--brand); }
 .fr-field-row { display: flex; align-items: center; gap: 10px; }
 .fr-field-row input[type=range] { flex: 1; }
 .fr-field-row .fr-num { min-width: 58px; text-align: right; }
-.fr-field-error { font-size: 11.5px; color: var(--danger-ink); font-weight: 600; }
+.fr-field-error { font-size: 12px; color: var(--danger-ink); font-weight: 600; }
 
 /* ---------- tabela ---------- */
-.fr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.fr-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint); font-weight: 700; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.fr-table td { padding: 8px 10px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+/* Densidade: o cabeçalho quebra em duas linhas em vez de esticar a coluna.
+   "Penetração exigida" em linha única empurrava a tabela para fora da tela e
+   obrigava a rolar no eixo x para ler justamente a coluna que importa. Os
+   números é que não quebram — 1.234.567 partido ao meio não se lê. */
+.fr-table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: auto; }
+.fr-table th { text-align: left; font-size: 11.5px; line-height: 1.25; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 500; padding: 5px 7px; border-bottom: 1px solid var(--line); white-space: normal; }
+.fr-table td { padding: 5px 7px; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
+.fr-table th.num { vertical-align: bottom; }
 .fr-table tr:last-child td { border-bottom: none; }
-.fr-table td.num, .fr-table th.num { text-align: right; font-family: var(--font-mono); }
-.fr-table tr.resto td { background: var(--paper); font-style: italic; }
-.fr-table tfoot td { font-weight: 700; border-top: 2px solid var(--line); }
+.fr-table td.num, .fr-table th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.fr-table td.num { white-space: nowrap; }
+.fr-table tr.resto td { background: var(--surface-2); color: var(--text-soft); font-style: normal; }
+.fr-table tfoot td { font-weight: 600; border-top: 1px solid var(--text); }
 
 /* ---------- botões ---------- */
-.fr-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--r-sm); font-size: 12.5px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text); font-family: var(--font-sans); }
-.fr-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
-.fr-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.fr-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--r-sm); font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--text); font-family: var(--font-sans); transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease; }
+.fr-btn:hover:not(:disabled) { background: var(--surface-2); border-color: #C2C2C6; color: var(--text); }
+.fr-btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
 .fr-btn.primary:hover:not(:disabled) { background: var(--brand-deep); border-color: var(--brand-deep); color: #fff; }
-.fr-btn.danger { color: var(--danger-ink); border-color: #e6bdb9; }
+.fr-btn.danger { color: var(--danger-ink); border-color: var(--danger-line); }
 .fr-btn.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); color: var(--danger-ink); }
 .fr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .fr-btn.sm { padding: 6px 10px; font-size: 12px; }
 .fr-seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.fr-seg button { padding: 7px 13px; font-size: 12px; font-weight: 600; border: none; background: #fff; color: var(--text-soft); cursor: pointer; border-right: 1px solid var(--line); font-family: var(--font-sans); }
+.fr-seg button { padding: 7px 13px; font-size: 12px; font-weight: 500; border: none; background: #fff; color: var(--text-soft); cursor: pointer; border-right: 1px solid var(--line); font-family: var(--font-sans); }
 .fr-seg button:last-child { border-right: none; }
-.fr-seg button.active { background: var(--brand); color: #fff; }
+.fr-seg button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+.fr-seg button.active { background: var(--brand); color: #fff; font-weight: 600; }
 
 /* ---------- alertas ---------- */
-.fr-alert { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-sm); font-size: 12.5px; border: 1px solid; }
-.fr-alert.critico { background: var(--danger-soft); border-color: #e6bdb9; color: var(--danger-ink); }
-.fr-alert.atencao { background: var(--premissa-soft); border-color: #e3cd9f; color: var(--premissa-ink); }
-.fr-alert.info { background: var(--estimativa-soft); border-color: #c0d2ea; color: var(--brand-deep); }
+.fr-alert { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-sm); font-size: 13px; border: 1px solid; }
+.fr-alert.critico { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-ink); }
+.fr-alert.atencao { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
+.fr-alert.info { background: var(--surface-2); border-color: var(--line); color: var(--text-soft); }
 .fr-alert svg { flex: 0 0 auto; margin-top: 1px; }
 
 /* ---------- funil ---------- */
 .fr-funnel { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; }
 .fr-funnel-stage { position: relative; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: filter 0.15s ease; border: none; padding: 0; min-height: 42px; }
-.fr-funnel-stage:hover { filter: brightness(1.08); }
+.fr-funnel-stage:hover:not(.estatico) { filter: brightness(1.12); }
+.fr-funnel-stage.estatico { cursor: default; }
 .fr-funnel-stage-inner { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; color: #fff; }
-.fr-funnel-label { font-size: 11.5px; font-weight: 600; text-align: left; }
-.fr-funnel-value { font-family: var(--font-mono); font-weight: 700; font-size: 13.5px; white-space: nowrap; }
-.fr-funnel-unit { font-size: 10.5px; opacity: 0.85; font-weight: 500; }
+.fr-funnel-label { font-size: 12px; font-weight: 500; text-align: left; }
+.fr-funnel-value { font-family: var(--font-mono); font-weight: 600; font-size: 14px; white-space: nowrap; }
+.fr-funnel-unit { font-size: 11px; opacity: 0.8; font-weight: 400; }
 .fr-funnel-connector { width: 1px; height: 6px; background: var(--line); }
 .fr-struct-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
-.fr-struct-card { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 12px; background: var(--paper); text-align: left; cursor: pointer; font-family: var(--font-sans); }
+.fr-struct-card { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 12px; background: var(--surface-2); text-align: left; cursor: pointer; font-family: var(--font-sans); }
+.fr-struct-card:hover { border-color: #C2C2C6; }
 .fr-struct-card.active { border-color: var(--brand); background: var(--brand-soft); }
-.fr-struct-card .lbl { font-size: 11px; color: var(--text-faint); font-weight: 600; }
-.fr-struct-card .val { font-family: var(--font-mono); font-weight: 700; font-size: 17px; margin-top: 2px; }
+.fr-struct-card .lbl { font-size: 12px; color: var(--text-faint); font-weight: 400; }
+.fr-struct-card .val { font-family: var(--font-mono); font-weight: 600; font-size: 18px; margin-top: 2px; }
 
 /* ---------- rede ---------- */
-.fr-tree-node { flex: 1; text-align: center; padding: 10px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper); }
-.fr-tree-node .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint); font-weight: 700; }
-.fr-tree-node .val { font-family: var(--font-mono); font-weight: 700; font-size: 14px; margin-top: 3px; }
+.fr-tree-node { flex: 1; text-align: center; padding: 10px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); }
+.fr-tree-node .lbl { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
+.fr-tree-node .val { font-family: var(--font-mono); font-weight: 600; font-size: 15px; margin-top: 3px; }
 .fr-tree-arrow { color: var(--text-faint); flex: 0 0 auto; }
 
 /* ---------- diversos ---------- */
 .fr-scroll-x { overflow-x: auto; }
 .fr-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.fr-chip { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: 16px; border: 1px solid var(--line); font-size: 12px; cursor: pointer; background: #fff; color: var(--text); font-family: var(--font-sans); }
+.fr-chip { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: var(--r-sm); border: 1px solid var(--line); font-size: 12px; cursor: pointer; background: #fff; color: var(--text); font-family: var(--font-sans); }
+.fr-chip:hover { border-color: #C2C2C6; }
 .fr-chip.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand-deep); font-weight: 600; }
 .fr-chip.static { cursor: default; }
 .fr-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--r-sm); border: 1px solid var(--line); background: #fff; cursor: pointer; color: var(--text-soft); }
 .fr-icon-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
 .fr-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.fr-progress-track { height: 8px; background: var(--line-2); border-radius: 4px; overflow: hidden; }
+.fr-progress-track { height: 8px; background: var(--line-2); border-radius: 0; overflow: hidden; }
+.fr-progress-track { position: relative; }
 .fr-progress-fill { height: 100%; background: var(--brand); transition: width 0.2s ease; }
+/* Trecho hachurado: onde a cobertura cai dependendo da conversão real. */
+.fr-progress-faixa {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px);
+}
 .fr-mobile-topbar { display: none; }
 .fr-sidebar-scrim { display: none; }
 .fr-boundary { max-width: 620px; margin: 60px auto; padding: 26px; border: 1px solid var(--line); border-radius: var(--r-md); background: #fff; font-family: var(--font-sans); color: var(--text); }
@@ -247,16 +350,17 @@ const STYLE = `
   .fr-sidebar { position: fixed; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform 0.2s ease; width: 78vw; max-width: 300px; }
   .fr-sidebar.open { transform: translateX(0); }
   .fr-mobile-topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; background: var(--ink); position: sticky; top: 0; z-index: 25; }
-  .fr-mobile-topbar .fr-brand-name { color: #fff; font-size: 12px; }
+  .fr-mobile-topbar .fr-brand-name { color: #fff; font-size: 13px; }
   .fr-content { padding: 16px 14px 50px; }
   .fr-grid-3, .fr-grid-4, .fr-grid-5 { grid-template-columns: 1fr 1fr; }
   .fr-grid-2, .fr-grid-split, .fr-grid-half { grid-template-columns: 1fr; }
   .fr-topbar { padding: 8px 12px; }
-  .fr-sidebar-scrim { display: block; position: fixed; inset: 0; background: rgba(10,14,28,0.5); z-index: 19; }
+  .fr-sidebar-scrim { display: block; position: fixed; inset: 0; background: rgba(15,16,19,0.55); z-index: 19; }
 }
 @media (max-width: 620px) {
   .fr-grid-2, .fr-grid-3, .fr-grid-4, .fr-grid-5 { grid-template-columns: 1fr; }
-  .fr-h1 { font-size: 19px; }
+  .fr-h1 { font-size: 21px; }
+  .fr-kpi-value { font-size: 26px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .fr-app *, .fr-app *::before, .fr-app *::after { transition: none !important; animation: none !important; }
@@ -276,7 +380,6 @@ const STYLE = `
    ========================================================================== */
 
 const ModeContext = createContext("pesquisador");
-const useMode = () => useContext(ModeContext);
 const useIsResearcher = () => useContext(ModeContext) === "pesquisador";
 
 /* ============================================================================
@@ -290,25 +393,88 @@ const PROV_LABEL = {
   estimativa: "Estimativa",
 };
 const PROV_HELP = {
-  oficial: "Definido em lei ou vindo de fonte oficial conectada.",
-  historico: "Referência congelada no código a partir de dados públicos anteriores. Não é uma consulta ao TSE.",
-  premissa: "Valor informado pela equipe de campanha.",
-  estimativa: "Resultado calculado a partir de premissas.",
+  oficial: "Vem da legislação ou de um arquivo oficial do TSE, com fonte e data declaradas.",
+  historico: "Apuração de um pleito passado, extraída dos arquivos oficiais. É referência, não previsão.",
+  premissa: "Valor informado pela equipe de campanha. Não existe fonte externa para ele.",
+  estimativa: "Resultado calculado a partir das premissas e dos dados acima.",
 };
 
-function ProvBadge({ type }) {
+const fmtDataBR = (iso) => {
+  if (!iso) return null;
+  const [a, m, d] = String(iso).split("-");
+  return d ? `${d}/${m}/${a}` : `${m}/${a}`;
+};
+
+/**
+ * Selo de proveniência. Quando o número vem de um arquivo, `fonte` aponta para
+ * a chave em FONTES e o selo passa a carregar órgão, data de referência e link
+ * — antes ele dizia apenas "Referência histórica", sem dizer de onde.
+ */
+function ProvBadge({ type, fonte, campo }) {
+  const id = fonte || (campo ? FONTE_DO_CAMPO[campo] : null);
+  const f = id ? FONTES[id] : null;
   if (!type || !PROV_LABEL[type]) return null;
+  const titulo = f
+    ? `${PROV_LABEL[type]} — ${f.orgao}. ${f.dataset}. Referência: ${fmtDataBR(f.dataReferencia)}. ${f.metodo}`
+    : PROV_HELP[type];
   return (
-    <span className={cx("fr-badge", type)} title={PROV_HELP[type]}>
+    <span className={cx("fr-badge", type)} title={titulo}>
       <span className="dot" />{PROV_LABEL[type]}
     </span>
   );
 }
 
-/** Detalhamento de fórmula. Só aparece no modo Pesquisador. */
-function Formula({ title = "Como este número foi calculado?", formula, variables = [], children }) {
+/** Ficha da fonte: órgão, dataset, data de referência, método e link. */
+function Fonte({ id, compacto = false }) {
+  const f = FONTES[id];
+  if (!f) return null;
+  if (compacto) {
+    return (
+      <span className="fr-hint">
+        Fonte: {f.orgao} — {f.dataset}, ref. {fmtDataBR(f.dataReferencia)}.{" "}
+        <a href={f.url} target="_blank" rel="noreferrer noopener">ver origem</a>
+      </span>
+    );
+  }
+  return (
+    <div className="fr-fonte">
+      <div className="fr-fonte-linha"><span>Órgão</span><b>{f.orgao}</b></div>
+      <div className="fr-fonte-linha"><span>Conjunto</span><b>{f.dataset}</b></div>
+      {f.arquivo && <div className="fr-fonte-linha"><span>Arquivo</span><b className="fr-mono">{f.arquivo}</b></div>}
+      <div className="fr-fonte-linha"><span>Data de referência</span><b>{fmtDataBR(f.dataReferencia)}</b></div>
+      <div className="fr-fonte-linha"><span>Extraído em</span><b>{fmtDataBR(f.dataColeta)}</b></div>
+      <div className="fr-fonte-metodo"><b>Como foi apurado:</b> {f.metodo}</div>
+      <a className="fr-btn sm" href={f.url} target="_blank" rel="noreferrer noopener" style={{ marginTop: 8 }}>
+        <ExternalLink size={12} /> Abrir a fonte
+      </a>
+    </div>
+  );
+}
+
+/**
+ * Bloco de fórmula. Cada linha vira um elemento próprio para que a quebra
+ * automática (telas estreitas) apareça recuada, e não como se fosse mais uma
+ * linha da conta.
+ */
+function FormulaBox({ children, style }) {
+  if (children == null || children === "") return null;
+  return (
+    <div className="fr-formula-box" style={style}>
+      {String(children).split("\n").map((linha, i) => (
+        <div className="fr-formula-linha" key={i}>{linha}</div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Detalhamento de fórmula. Fica disponível nos DOIS modos: esconder a conta
+ * atrás do modo Pesquisador deixava o número sem como ser auditado por quem
+ * mais precisa confiar nele. O modo Pesquisador continua controlando os blocos
+ * avançados (cenários, simulação, proveniência detalhada), não a fórmula.
+ */
+function Formula({ title = "Como este número foi calculado?", formula, variables = [], fonte, children }) {
   const [open, setOpen] = useState(false);
-  if (!useIsResearcher()) return null;
   return (
     <div className="fr-disclosure">
       <button className="fr-disclosure-btn" onClick={() => setOpen((o) => !o)} type="button" aria-expanded={open}>
@@ -317,21 +483,43 @@ function Formula({ title = "Como este número foi calculado?", formula, variable
       </button>
       {open && (
         <div className="fr-disclosure-body">
-          {formula && <div className="fr-formula-box">{formula}</div>}
+          {formula && <FormulaBox>{formula}</FormulaBox>}
           {variables.length > 0 && (
             <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
               {variables.map((v, i) => (
                 <li key={i} style={{ marginBottom: 3 }}>
                   <span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}
-                  {v.prov && <span style={{ marginLeft: 6 }}><ProvBadge type={v.prov} /></span>}
+                  {v.prov && <span style={{ marginLeft: 6 }}><ProvBadge type={v.prov} fonte={v.fonte} /></span>}
                 </li>
               ))}
             </ul>
           )}
+          {fonte && <div style={{ marginTop: 8 }}><Fonte id={fonte} compacto /></div>}
           {children}
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Título de card com a conta atrás de um "i". A fórmula escrita direto no
+ * subtítulo custava três linhas de tela para todo mundo, inclusive para quem
+ * já a conhece; aqui ela fica a um clique, no mesmo gesto do "i" dos KPIs.
+ */
+function TituloComInfo({ title, rotulo = "Como este número é calculado?", children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="fr-row" style={{ gap: 6 }}>
+        <h2 className="fr-h2">{title}</h2>
+        <button type="button" className="fr-info-btn" aria-expanded={open}
+          aria-label={rotulo} title={rotulo} onClick={() => setOpen((o) => !o)}>
+          <Info size={13} />
+        </button>
+      </div>
+      {open && <div className="fr-kpi-detalhe">{children}</div>}
+    </>
   );
 }
 
@@ -340,16 +528,121 @@ function ResearcherOnly({ children }) {
   return useIsResearcher() ? <>{children}</> : null;
 }
 
-function Kpi({ label, value, sub, prov, tone }) {
+/**
+ * Indicador. `formula` e `fonte` são opcionais, mas quando existem o KPI ganha
+ * um botão de informação que abre a conta e a origem ali mesmo — sem depender
+ * de o usuário achar o bloco de fórmula no fim da tela, nem de estar no modo
+ * Pesquisador.
+ */
+function Kpi({ label, value, sub, prov, tone, formula, variables = [], fonte, nota }) {
+  const [open, setOpen] = useState(false);
   const color = tone === "danger" ? "var(--danger-ink)" : tone === "ok" ? "var(--oficial-ink)" : undefined;
+  const temDetalhe = Boolean(formula || fonte || nota || variables.length);
   return (
     <div className="fr-kpi">
       <div className="fr-row fr-between">
         <span className="fr-kpi-label">{label}</span>
-        {prov && <ProvBadge type={prov} />}
+        <span className="fr-row" style={{ gap: 4 }}>
+          {prov && <ProvBadge type={prov} fonte={fonte} />}
+          {temDetalhe && (
+            <button type="button" className="fr-info-btn" aria-expanded={open}
+              aria-label={`De onde vem "${label}"`} title={`De onde vem "${label}"`}
+              onClick={() => setOpen((o) => !o)}>
+              <Info size={13} />
+            </button>
+          )}
+        </span>
       </div>
       <div className="fr-kpi-value" style={color ? { color } : undefined}>{value}</div>
       {sub && <div className="fr-kpi-sub">{sub}</div>}
+      {open && temDetalhe && (
+        <div className="fr-kpi-detalhe">
+          {formula && <FormulaBox>{formula}</FormulaBox>}
+          {variables.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              {variables.map((v, i) => (
+                <li key={i} style={{ marginBottom: 2 }}>
+                  <span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}
+                </li>
+              ))}
+            </ul>
+          )}
+          {nota && <p style={{ marginTop: 6 }}>{nota}</p>}
+          {fonte && <div style={{ marginTop: 6 }}><Fonte id={fonte} compacto /></div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Indicador com FAIXA em vez de número exato.
+ *
+ * Um resultado que sai de "15% de conversão no corpo a corpo" — um chute — não
+ * merece sete dígitos significativos. "1.078.431 contatos" é uma resposta falsa;
+ * "entre 920 mil e 1,3 mi" é a verdadeira. O valor central continua acessível
+ * no painel de detalhe, para quem precisa de um número único para planejar.
+ *
+ * `faixa` é o resumo de percentis vindo do Monte Carlo ({ p10, p50, p90 }).
+ */
+function KpiFaixa({ label, faixa, formatar = fmtSig, prov = PROV.ESTIMATIVA, tone, sub, formula, variables = [], nota, exato }) {
+  const [open, setOpen] = useState(false);
+  const color = tone === "danger" ? "var(--danger-ink)" : tone === "ok" ? "var(--oficial-ink)" : undefined;
+  const indefinido = !faixa || !isFiniteNum(faixa.p10) || !isFiniteNum(faixa.p90);
+  return (
+    <div className="fr-kpi">
+      <div className="fr-row fr-between">
+        <span className="fr-kpi-label">{label}</span>
+        <span className="fr-row" style={{ gap: 4 }}>
+          <ProvBadge type={prov} />
+          <button type="button" className="fr-info-btn" aria-expanded={open}
+            aria-label={`De onde vem "${label}"`} title={`De onde vem "${label}"`}
+            onClick={() => setOpen((o) => !o)}>
+            <Info size={13} />
+          </button>
+        </span>
+      </div>
+      {indefinido ? (
+        <div className="fr-kpi-value">—</div>
+      ) : (
+        <>
+          <div className="fr-kpi-faixa" style={color ? { color } : undefined}>
+            {formatar(faixa.p10)}<span className="ate">–</span>{formatar(faixa.p90)}
+          </div>
+          <div className="fr-kpi-sub">
+            central {formatar(faixa.p50)}
+            {sub ? ` · ${sub}` : ""}
+          </div>
+        </>
+      )}
+      {open && (
+        <div className="fr-kpi-detalhe">
+          <p>
+            A faixa cobre <b>80% das 3.000 simulações</b> (percentis 10 a 90), variando abstenção,
+            fidelidade e conversão dentro dos limites definidos em <b>Simulações</b>. Não é margem de
+            erro estatística: é o espalhamento que as suas próprias premissas produzem.
+          </p>
+          {!indefinido && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              <li>Otimista (P10): <span className="fr-mono">{formatar(faixa.p10)}</span></li>
+              <li>Central (P50): <span className="fr-mono">{formatar(faixa.p50)}</span></li>
+              <li>Pessimista (P90): <span className="fr-mono">{formatar(faixa.p90)}</span></li>
+              {isFiniteNum(exato) && (
+                <li>Cálculo determinístico, sem variação: <span className="fr-mono">{fmtInt(exato)}</span></li>
+              )}
+            </ul>
+          )}
+          {formula && <FormulaBox style={{ marginTop: 8 }}>{formula}</FormulaBox>}
+          {variables.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+              {variables.map((v, i) => (
+                <li key={i}><span className="fr-mono" style={{ fontWeight: 600 }}>{v.name}</span>: {v.value}</li>
+              ))}
+            </ul>
+          )}
+          {nota && <p style={{ marginTop: 6 }}>{nota}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -441,6 +734,22 @@ function AlertList({ alerts, empty = "Nenhum alerta ativo para o plano atual." }
   );
 }
 
+/**
+ * Trocar de UF invalida tudo o que era específico dela: os municípios
+ * priorizados, o município do cargo majoritário e os parâmetros que a equipe
+ * informou por território. Sem esse reset, selecionar MG mantinha ids de
+ * municípios de SP e o app caía silenciosamente no fallback.
+ */
+function mudarUf(cfg, uf) {
+  const municipios = getMunicipiosDaUf(uf);
+  return {
+    uf,
+    territoriosSelecionados: municipios.map((m) => m.id),
+    municipioId: municipios[0]?.id || null,
+    territorioParams: {},
+  };
+}
+
 function SectionHead({ eyebrow, title, desc }) {
   return (
     <div className="fr-section-head">
@@ -451,7 +760,7 @@ function SectionHead({ eyebrow, title, desc }) {
   );
 }
 
-const PROV_COLOR = { oficial: "#187A56", historico: "#6A5AA8", premissa: "#B9821F", estimativa: "#3D6BA8" };
+const PROV_COLOR = { oficial: "#1A6B4C", historico: "#5B4E92", premissa: "#565A66", estimativa: "#2F5D96" };
 
 /**
  * Diagrama do funil. Só as etapas de VOLUME (pessoas, contatos, ações)
@@ -474,19 +783,27 @@ function FunnelDiagram({ stages, onSelect, activeKey }) {
           const ratio = Math.sqrt(Math.max(v, maxV * 0.02) / maxV);
           const widthPct = minWidthPct + ratio * (100 - minWidthPct);
           const active = activeKey === s.key;
+          // Sem onSelect a etapa é um gráfico, não um controle. Antes ela saía
+          // como <button aria-pressed="false"> com cursor de mão e brilho no
+          // hover em telas onde o clique não fazia nada — afordância falsa, e
+          // seis botões alternáveis inertes anunciados por leitor de tela.
+          const interativo = typeof onSelect === "function";
+          const Tag = interativo ? "button" : "div";
+          const estilo = {
+            width: `${widthPct}%`,
+            background: PROV_COLOR[s.prov] || "#2F5D96",
+            opacity: activeKey && !active ? 0.72 : 1,
+            borderRadius: 3,
+            boxShadow: active ? "0 0 0 2px var(--ink)" : "none",
+          };
           return (
             <React.Fragment key={s.key}>
-              <button
-                type="button" className="fr-funnel-stage"
-                aria-pressed={active}
-                style={{
-                  width: `${widthPct}%`,
-                  background: PROV_COLOR[s.prov] || "#3D6BA8",
-                  opacity: activeKey && !active ? 0.72 : 1,
-                  borderRadius: 3,
-                  boxShadow: active ? "0 0 0 2px var(--ink)" : "none",
-                }}
-                onClick={() => onSelect && onSelect(s.key)}
+              <Tag
+                {...(interativo
+                  ? { type: "button", "aria-pressed": active, onClick: () => onSelect(s.key) }
+                  : {})}
+                className={cx("fr-funnel-stage", !interativo && "estatico")}
+                style={estilo}
               >
                 <span className="fr-funnel-stage-inner">
                   <span className="fr-funnel-label">{i + 1}. {s.label}</span>
@@ -495,7 +812,7 @@ function FunnelDiagram({ stages, onSelect, activeKey }) {
                     {s.unit && <span className="fr-funnel-unit"> {s.unit}</span>}
                   </span>
                 </span>
-              </button>
+              </Tag>
               {i < volume.length - 1 && <div className="fr-funnel-connector" />}
             </React.Fragment>
           );
@@ -511,6 +828,7 @@ function FunnelDiagram({ stages, onSelect, activeKey }) {
             {estrutura.map((s) => (
               <button key={s.key} type="button" aria-pressed={activeKey === s.key}
                 className={cx("fr-struct-card", activeKey === s.key && "active")}
+                disabled={typeof onSelect !== "function"}
                 onClick={() => onSelect && onSelect(s.key)}>
                 <div className="lbl">{s.label}</div>
                 <div className="val">{s.displayValue ?? fmtInt(s.value)} <span className="fr-funnel-unit" style={{ color: "var(--text-faint)" }}>{s.unit}</span></div>
@@ -588,9 +906,12 @@ class ErrorBoundary extends React.Component {
    VIEW: VISÃO GERAL
    ========================================================================== */
 
-function ViewVisaoGeral({ cfg, derived, setActiveView }) {
+function ViewVisaoGeral({ cfg, derived, setActiveView, incerteza }) {
   const d = derived;
-  const coberturaCapacidade = clamp01(safeDiv(d.dailyCapacity, d.dailyContacts));
+  // Cobertura da capacidade nos dois extremos da simulação: a demanda menor
+  // (P10) é o caso em que a estrutura cobre mais; a maior (P90), em que cobre menos.
+  const coberturaOtimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p10));
+  const coberturaPessimista = clamp01(safeDiv(d.dailyCapacity, incerteza.daily.p90));
   const temRegistro = d.planejado > 0 || d.realizado > 0;
 
   return (
@@ -598,29 +919,92 @@ function ViewVisaoGeral({ cfg, derived, setActiveView }) {
       <SectionHead eyebrow="Painel executivo" title="Visão Geral"
         desc="Os dez indicadores que resumem a distância entre a meta e a operação — atualizados a cada alteração de premissa ou cenário." />
 
+      <div className="fr-alert info" style={{ marginBottom: 14 }}>
+        <Info size={15} />
+        <span>
+          Os indicadores que dependem de conversão aparecem como <b>faixa</b>, não como número
+          exato. Um resultado que sai de uma taxa de conversão estimada não tem precisão à unidade —
+          a faixa cobre 80% de 3.000 simulações das suas próprias premissas. O valor central e o
+          cálculo determinístico estão no botão de informação de cada indicador.{" "}
+          <button type="button" className="fr-link-btn" onClick={() => setActiveView("simulacoes")}>
+            Ajustar os limites da incerteza
+          </button>
+        </span>
+      </div>
+
       <div className="fr-grid fr-grid-5">
-        <Kpi label="Meta de votos" value={fmtInt(cfg.voteGoal)} prov={PROV.PREMISSA} />
-        <Kpi label="Meta ajustada" value={fmtInt(d.adjustedGoal)}
-          sub={`comparecimento ${fmtPct(d.turnoutRate)} · fidelidade ${fmtPct(d.scenario.fidelityRate)}`} prov={PROV.ESTIMATIVA} />
-        <Kpi label="Contatos necessários" value={fmtInt(d.totalContactsNeeded)} prov={PROV.ESTIMATIVA} />
+        <Kpi label="Meta de votos" value={fmtInt(cfg.voteGoal)} prov={PROV.PREMISSA}
+          nota="Número que a campanha escolheu perseguir. Não é dado nem previsão: é a decisão da qual todo o resto deriva. Altere em Meta Eleitoral." />
+        <KpiFaixa label="Meta ajustada" faixa={incerteza.adjustedGoal} exato={d.adjustedGoal}
+          sub={`abstenção ${fmtPct(cfg.abstentionRate)} · fidelidade ${fmtPct(d.scenario.fidelityRate)}`}
+          formula={"META_AJUSTADA = META_VOTOS ÷ (TAXA_FIDELIDADE × TAXA_COMPARECIMENTO)"}
+          variables={[
+            { name: "META_VOTOS", value: `${fmtInt(cfg.voteGoal)} (decisão sua, não varia)` },
+            { name: "ABSTENÇÃO", value: `${fmtPct(cfg.abstentionRate)} ± 7 p.p. na simulação` },
+            { name: "FIDELIDADE", value: `${fmtPct(d.scenario.fidelityRate)} (−12 / +8 p.p.)` },
+          ]}
+          nota="As duas taxas são premissas do cenário ativo, não medições. O comparecimento medido na circunscrição aparece em Territórios." />
+        <KpiFaixa label="Contatos necessários" faixa={incerteza.contacts} exato={d.totalContactsNeeded}
+          formula={"CONTATOS = Σ canal [ (META_AJUSTADA × PARTICIPAÇÃO_CANAL) ÷ CONVERSÃO_CANAL ]"}
+          variables={d.enabledChannels.map((c) => ({ name: c.label, value: `${fmtPct(c.share)} da meta ÷ ${fmtPct(c.conversion)} ≈ ${fmtSig(c.contactsNeeded)}` }))}
+          nota="É aqui que a incerteza mais dói: a conversão entra na simulação variando de 70% a 130% do valor que você informou, porque quase nenhuma campanha conhece a própria taxa." />
         {/* Estes dois liam "0" fixo; agora vêm do registro operacional. */}
         <Kpi label="Contatos realizados" value={fmtInt(d.realizado)}
           sub={temRegistro ? `${fmtPct(d.progressoFunil)} da meta de contatos` : "Registre em Relatórios → rastreamento"}
-          prov={PROV.PREMISSA} />
-        <Kpi label="Déficit de contatos" value={fmtInt(d.deficitContatos)}
+          prov={PROV.PREMISSA}
+          nota="Soma do que a equipe registrou manualmente em Relatórios. Não há importação automática nesta versão." />
+        <KpiFaixa label="Déficit de contatos" exato={d.deficitContatos}
+          faixa={{
+            p10: Math.max(0, incerteza.contacts.p10 - d.realizado),
+            p50: Math.max(0, incerteza.contacts.p50 - d.realizado),
+            p90: Math.max(0, incerteza.contacts.p90 - d.realizado),
+          }}
           sub="necessários − realizados"
-          tone={d.deficitContatos > 0 ? "danger" : "ok"} prov={PROV.ESTIMATIVA} />
+          tone={d.deficitContatos > 0 ? "danger" : "ok"}
+          formula={"DÉFICIT = CONTATOS_NECESSÁRIOS − CONTATOS_REALIZADOS"}
+          variables={[
+            { name: "CONTATOS_NECESSÁRIOS", value: fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90) },
+            { name: "CONTATOS_REALIZADOS", value: `${fmtInt(d.realizado)} (registrado, não varia)` },
+          ]} />
         <Kpi label="Dias restantes" value={fmtInt(d.diasRestantes)}
-          sub={`de ${fmtInt(cfg.campaignDays)} dias de campanha`} prov={PROV.ESTIMATIVA} />
-        <Kpi label="Meta diária" value={fmtInt(d.dailyContacts)} prov={PROV.ESTIMATIVA} />
+          sub={`de ${fmtInt(cfg.campaignDays)} dias de campanha`} prov={PROV.ESTIMATIVA}
+          formula={"DIAS_RESTANTES = DATA_FIM_DA_AGENDA − HOJE"}
+          variables={[
+            { name: "DATA_FIM", value: cfg.agenda.dataFim },
+            { name: "1º TURNO DE " + cfg.eleicaoAno, value: electionDates(cfg.eleicaoAno)?.primeiroTurno || "—" },
+          ]}
+          fonte="DATAS_LEI_9504"
+          nota="Conta para a data final da Agenda, não para o ano escolhido na barra de contexto. Se as duas divergirem, aparece um alerta aqui em cima." />
+        <KpiFaixa label="Meta diária" faixa={incerteza.daily} exato={d.dailyContacts}
+          formula={"META_DIÁRIA = CONTATOS_NECESSÁRIOS ÷ DIAS_DE_CAMPANHA"}
+          variables={[
+            { name: "CONTATOS_NECESSÁRIOS", value: fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90) },
+            { name: "DIAS_DE_CAMPANHA", value: `${fmtInt(cfg.campaignDays)} (não varia)` },
+          ]} />
         <Kpi label="Capacidade diária" value={fmtInt(d.dailyCapacity)}
           sub={d.capacityStatus === "insuficiente" ? "abaixo da meta diária" : "dentro ou acima da meta diária"}
-          tone={d.capacityStatus === "insuficiente" ? "danger" : "ok"} prov={PROV.ESTIMATIVA} />
-        <Kpi label="Cobertura territorial" value={`${d.territoriosPrioritarios.length} território(s)`}
-          sub={`${fmtPct(d.territories.filter((t) => !t.resto).reduce((a, t) => a + t.eleitoradoShare, 0))} do eleitorado`}
-          prov={PROV.ESTIMATIVA} />
-        <Kpi label="Custo estimado" value={fmtMoney(d.totalCost)} sub={`${fmtMoney(d.costPerSupport)} por apoio`}
-          tone={d.budgetGap < 0 ? "danger" : undefined} prov={PROV.ESTIMATIVA} />
+          tone={d.capacityStatus === "insuficiente" ? "danger" : "ok"} prov={PROV.ESTIMATIVA}
+          formula={"CAPACIDADE = MOBILIZADORES × HORAS_DIA × CONTATOS_HORA\n           + REUNIÕES_DIA × CONTATOS_POR_REUNIÃO\n           + EVENTOS_DIA × CONTATOS_POR_EVENTO"}
+          variables={[
+            { name: "MOBILIZADORES", value: fmtInt(cfg.team.mobilizadores) },
+            { name: "HORAS_DIA × CONTATOS_HORA", value: `${fmtDec(cfg.team.horasDia, 1)} × ${fmtInt(cfg.team.contatosHora)}` },
+          ]}
+          nota="Todos os parâmetros são premissas da equipe, editáveis em Equipes." />
+        <Kpi label="Cobertura territorial" value={fmtInt(d.territoriosPrioritarios.length)}
+          sub={`de ${fmtInt(d.territories.length)} territórios · ${fmtPct(d.territories.filter((t) => !t.resto).reduce((a, t) => a + t.eleitoradoShare, 0))} do eleitorado`}
+          prov={PROV.ESTIMATIVA} fonte="ELEITORADO_2026"
+          nota="Territórios priorizados na distribuição da meta. O eleitorado de cada um vem do cadastro do TSE; o recorte é seu, em Territórios." />
+        <KpiFaixa label="Custo estimado" faixa={incerteza.cost} exato={d.totalCost}
+          formatar={(v) => fmtSig(v, 3)}
+          sub={`orçamento ${fmtSig(cfg.budget.orcamentoTotal)}`}
+          tone={incerteza.cost.p90 > cfg.budget.orcamentoTotal ? "danger" : undefined}
+          formula={"CUSTO = CONTATOS × CUSTO_POR_CONTATO\n      + EVENTOS × CUSTO_POR_EVENTO\n      + DIAS_ATIVOS × CUSTO_LOGÍSTICO_DIA"}
+          variables={[
+            { name: "CUSTO_POR_CONTATO", value: fmtMoney(cfg.budget.custoPorContato) },
+            { name: "CUSTO_POR_EVENTO", value: fmtMoney(cfg.budget.custoPorEvento) },
+            { name: "CUSTO_LOGÍSTICO_DIA", value: fmtMoney(cfg.budget.custoLogisticoDia) },
+          ]}
+          nota="Valores unitários informados pela equipe, em Orçamento. Não incluem limites legais de gasto de campanha." />
       </div>
 
       <div className="fr-grid fr-grid-half">
@@ -629,18 +1013,25 @@ function ViewVisaoGeral({ cfg, derived, setActiveView }) {
           <p className="fr-desc">Comparação entre o que a estrutura atual consegue entregar por dia e o que o funil exige.</p>
           <div style={{ marginTop: 12 }}>
             <div className="fr-line">
-              <span>Capacidade: <b className="fr-num">{fmtInt(d.dailyCapacity)}</b></span>
-              <span>Demanda: <b className="fr-num">{fmtInt(d.dailyContacts)}</b></span>
+              <span>Capacidade: <b className="fr-num">{fmtInt(d.dailyCapacity)}</b> / dia</span>
+              <span>Demanda: <b className="fr-num">{fmtFaixa(incerteza.daily.p10, incerteza.daily.p90)}</b> / dia</span>
             </div>
+            {/* Duas faixas: a cobertura no cenário otimista e no pessimista.
+                Uma barra só sugeria que a demanda era um ponto conhecido. */}
             <div className="fr-progress-track" role="img"
-              aria-label={`Capacidade cobre ${fmtPct(coberturaCapacidade)} da demanda diária`}>
+              aria-label={`A estrutura cobre entre ${fmtPct(coberturaPessimista)} e ${fmtPct(coberturaOtimista)} da demanda diária`}>
               <div className="fr-progress-fill" style={{
-                width: `${Math.min(100, coberturaCapacidade * 100)}%`,
+                width: `${Math.min(100, coberturaPessimista * 100)}%`,
                 background: d.capacityStatus === "insuficiente" ? "var(--danger)" : "var(--oficial)",
+              }} />
+              <div className="fr-progress-faixa" style={{
+                left: `${Math.min(100, coberturaPessimista * 100)}%`,
+                width: `${Math.max(0, Math.min(100, coberturaOtimista * 100) - Math.min(100, coberturaPessimista * 100))}%`,
               }} />
             </div>
             <div className="fr-hint" style={{ marginTop: 6 }}>
-              A estrutura cobre <b>{fmtPct(coberturaCapacidade)}</b> da demanda diária.
+              A estrutura cobre entre <b>{fmtPct(coberturaPessimista)}</b> e <b>{fmtPct(coberturaOtimista)}</b> da
+              demanda diária, conforme a conversão real fique perto do pior ou do melhor caso simulado.
             </div>
           </div>
           <button className="fr-btn sm" style={{ marginTop: 12 }} onClick={() => setActiveView("equipes")}>
@@ -654,7 +1045,7 @@ function ViewVisaoGeral({ cfg, derived, setActiveView }) {
           <div style={{ marginTop: 12 }}>
             <div className="fr-line">
               <span>Realizado: <b className="fr-num">{fmtInt(d.realizado)}</b></span>
-              <span>Necessário: <b className="fr-num">{fmtInt(d.totalContactsNeeded)}</b></span>
+              <span>Necessário: <b className="fr-num">{fmtFaixa(incerteza.contacts.p10, incerteza.contacts.p90)}</b></span>
             </div>
             <div className="fr-progress-track" role="img" aria-label={`${fmtPct(d.progressoFunil)} do funil percorrido`}>
               <div className="fr-progress-fill" style={{ width: `${d.progressoFunil * 100}%` }} />
@@ -704,7 +1095,7 @@ function ViewVisaoGeral({ cfg, derived, setActiveView }) {
    mudança.
    ========================================================================== */
 
-function ViewMetaEleitoral({ cfg, update, derived }) {
+function ViewMetaEleitoral({ cfg, update, derived, setActiveView }) {
   const d = derived;
   const office = d.office;
   return (
@@ -728,7 +1119,7 @@ function ViewMetaEleitoral({ cfg, update, derived }) {
             <label className="fr-field-label" htmlFor="uf-select">
               <span>Qual é a circunscrição (UF)?</span><ProvBadge type={PROV.PREMISSA} />
             </label>
-            <select id="uf-select" value={cfg.uf} onChange={(e) => update({ uf: e.target.value })}>
+            <select id="uf-select" value={cfg.uf} onChange={(e) => update(mudarUf(cfg, e.target.value))}>
               {UF_DATA.map((u) => <option key={u.code} value={u.code}>{u.name}</option>)}
             </select>
           </div>
@@ -743,7 +1134,7 @@ function ViewMetaEleitoral({ cfg, update, derived }) {
                 <span>Município</span><ProvBadge type={PROV.PREMISSA} />
               </label>
               <select id="mun-select" value={cfg.municipioId} onChange={(e) => update({ municipioId: e.target.value })}>
-                {SP_MUNICIPIOS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                {getMunicipiosDaUf(cfg.uf).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
               </select>
             </div>
           </div>
@@ -773,6 +1164,7 @@ function ViewMetaEleitoral({ cfg, update, derived }) {
         <p className="fr-desc">Da meta declarada até o que a estrutura atual entrega por dia.</p>
         <div style={{ marginTop: 14, maxWidth: 620, marginLeft: "auto", marginRight: "auto" }}>
           <FunnelDiagram
+            onSelect={() => setActiveView("funil")}
             stages={[
               { key: "meta", label: "Meta", value: cfg.voteGoal, prov: PROV.PREMISSA, unit: "votos" },
               { key: "ajustada", label: "Meta ajustada", value: d.adjustedGoal, prov: PROV.ESTIMATIVA, unit: "votos" },
@@ -865,7 +1257,7 @@ function ViewFunilReverso({ cfg, derived, setActiveView }) {
       formula: "ELEITORES_ALVO = Σ território priorizado [ ELEITORADO × TAXA_COMPARECIMENTO ]\n\nUniverso de eleitores que efetivamente comparecem nos territórios\npriorizados — o denominador real do esforço.",
       vars: [
         ["Territórios priorizados", fmtInt(d.territoriosPrioritarios.length)],
-        ["Eleitorado priorizado", fmtInt(d.territoriosPrioritarios.reduce((a, t) => a + t.eleitoradoM, 0) * 1e6)],
+        ["Eleitorado priorizado", fmtInt(d.territoriosPrioritarios.reduce((a, t) => a + t.eleitores, 0))],
         ["Penetração exigida", fmtPct(safeDiv(d.adjustedGoal, d.eleitoresAlvo))],
       ],
     },
@@ -920,7 +1312,7 @@ function ViewFunilReverso({ cfg, derived, setActiveView }) {
                 <h2 className="fr-h2">{activeStage.label}</h2>
                 <ProvBadge type={activeStage.prov} />
               </div>
-              <div className="fr-formula-box" style={{ marginTop: 8 }}>{stageDetail[activeStage.key]?.formula}</div>
+              <FormulaBox style={{ marginTop: 8 }}>{stageDetail[activeStage.key]?.formula}</FormulaBox>
               {(stageDetail[activeStage.key]?.vars || []).length > 0 && (
                 <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5, color: "var(--text-soft)" }}>
                   {stageDetail[activeStage.key].vars.map(([name, value], i) => (
@@ -985,7 +1377,7 @@ const WEIGHT_LABELS = {
 function ViewTerritorios({ cfg, update, derived }) {
   const d = derived;
   const office = d.office;
-  const detalhado = office.nivel === "estadual" && cfg.uf === "SP";
+  const detalhado = office.nivel === "estadual" && getMunicipiosDaUf(cfg.uf).length > 0;
 
   const toggleTerritorio = (id) => {
     const sel = cfg.territoriosSelecionados.includes(id)
@@ -994,6 +1386,15 @@ function ViewTerritorios({ cfg, update, derived }) {
     update({ territoriosSelecionados: sel.length ? sel : cfg.territoriosSelecionados });
   };
   const setWeight = (key, v) => update({ territorialWeights: { ...cfg.territorialWeights, [key]: v } });
+  /** Os quatro critérios sem fonte pública. Guardados por território em cfg. */
+  const setParam = (id, campo, valor) => update({
+    territorioParams: {
+      ...(cfg.territorioParams || {}),
+      [id]: { ...getParamsTerritorio(cfg, id), [campo]: valor },
+    },
+  });
+  const limparParams = () => update({ territorioParams: {} });
+  const paramsInformados = Object.keys(cfg.territorioParams || {}).length;
   const normalizarPesos = () => {
     const total = Object.values(cfg.territorialWeights).reduce((a, b) => a + b, 0);
     if (!total) return;
@@ -1017,120 +1418,185 @@ function ViewTerritorios({ cfg, update, derived }) {
       {office.nivel === "municipal" && (
         <div className="fr-alert info"><Info size={15} /><span>Cargo municipal: a meta fica concentrada em {getMunicipio(cfg)?.name || getUf(cfg).name}. Troque o município em Meta Eleitoral.</span></div>
       )}
-      {office.nivel === "estadual" && !detalhado && (
+      {office.nivel === "estadual" && detalhado && (
         <div className="fr-alert info"><Info size={15} /><span>
-          O recorte município a município existe apenas para São Paulo nesta versão. Para {getUf(cfg).name}, o cálculo usa o estado como território único até a importação real do TSE.
+          O recorte traz os {getMunicipiosDaUf(cfg.uf).length} maiores municípios de {getUf(cfg).name} por eleitorado,
+          com o eleitorado e o comparecimento apurados pelo TSE. Os demais {fmtInt(Math.max(0, getUf(cfg).municipios - getMunicipiosDaUf(cfg.uf).length))} municípios
+          entram somados em "Restante do estado".
+        </span></div>
+      )}
+      {office.nivel === "estadual" && !detalhado && (
+        <div className="fr-alert atencao"><AlertTriangle size={15} /><span>
+          Não há recorte municipal para {getUf(cfg).name} nesta versão: o cálculo usa o estado como território único.
         </span></div>
       )}
 
-      <div className="fr-grid fr-grid-split">
-        <div className="fr-card">
-          <h2 className="fr-h2">Distribuição da meta por território</h2>
-          <p className="fr-desc">
-            META_TERRITORIAL = META_AJUSTADA × (SCORE_DO_TERRITÓRIO / Σ SCORES). A coluna
-            <b> penetração</b> mostra quanto dos votos daquele território a meta exige — é ela que
-            revela um peso mal calibrado.
+      <div className="fr-card">
+        <TituloComInfo title="Distribuição da meta por território"
+          rotulo="Abrir a conta da distribuição territorial">
+          <FormulaBox>{"SCORE = Σ critério [ VALOR_NORMALIZADO × PESO ] − LOGÍSTICA_NORM × PESO_LOGÍSTICA\n\nVALOR_NORMALIZADO = VALOR ÷ MAIOR_VALOR_DA_LISTA\n\nMETA_TERRITORIAL = META_AJUSTADA × (SCORE ÷ Σ SCORES)\n\nVOTANTES_ESPERADOS = ELEITORADO × COMPARECIMENTO_MEDIDO\nPENETRAÇÃO_EXIGIDA = META_TERRITORIAL ÷ VOTANTES_ESPERADOS"}</FormulaBox>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 16 }}>
+            <li>META_AJUSTADA: {fmtInt(d.adjustedGoal)} <ProvBadge type={PROV.ESTIMATIVA} /></li>
+            <li>Ano de referência: {d.anoReferencia} <ProvBadge type={PROV.HISTORICO} fonte={`COMPARECIMENTO_${d.anoReferencia}`} /></li>
+            <li>Σ pesos: {fmtPct(d.weightSum)} <ProvBadge type={PROV.PREMISSA} /></li>
+          </ul>
+          <p style={{ marginTop: 8 }}>
+            A coluna <b>penetração exigida</b> mostra quanto dos votos daquele território a meta
+            pede — é ela que revela um peso mal calibrado.
           </p>
-          <div className="fr-scroll-x" style={{ marginTop: 12 }}>
-            <table className="fr-table">
-              <thead>
-                <tr>
-                  <th>Território</th>
-                  <th className="num">Eleitorado</th>
-                  <th className="num">% do eleitorado</th>
-                  <th className="num">Score</th>
-                  <th className="num">% da meta</th>
-                  <th className="num">Meta territorial</th>
-                  <th className="num">Penetração exigida</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.territories.map((t) => {
-                  const alto = t.penetracaoNecessaria > 0.35;
-                  return (
-                    <tr key={t.id} className={cx(t.resto && "resto")}>
-                      <td>{t.name}{t.resto && <span className="fr-hint"> (não priorizado)</span>}</td>
-                      <td className="num">{fmtDec(t.eleitoradoM, 2)} M</td>
-                      <td className="num">{fmtPct(t.eleitoradoShare)}</td>
-                      <td className="num">{fmtDec(t.score, 2)}</td>
-                      <td className="num">{fmtPct(t.share)}</td>
-                      <td className="num" style={{ fontWeight: 700 }}>{fmtInt(t.metaTerritorial)}</td>
-                      <td className="num" style={{ color: alto ? "var(--danger-ink)" : undefined, fontWeight: alto ? 700 : 400 }}>
-                        {fmtPct(t.penetracaoNecessaria, 2)}
+          <p style={{ marginTop: 6 }}>
+            Eleitorado e comparecimento são medidos; histórico, presença, capacidade e logística
+            são informados pela equipe e começam neutros — enquanto ninguém os informa, eles não
+            desempatam nada e a meta se distribui por eleitorado e comparecimento.
+          </p>
+        </TituloComInfo>
+        <div className="fr-scroll-x" style={{ marginTop: 12 }}>
+          <table className="fr-table">
+            <thead>
+              <tr>
+                <th rowSpan={2}>Território</th>
+                <th className="num" colSpan={3}>Medido pelo TSE</th>
+                {/* O rótulo vem de PROV_DO_CAMPO, não de uma suposição da
+                    tela: se um critério algum dia ganhar fonte, o cabeçalho
+                    deixa de chamá-lo de premissa sozinho. */}
+                <th className="num fr-th-premissa" colSpan={PARAMS_TERRITORIAIS_CAMPOS.length}
+                  title={PARAMS_TERRITORIAIS_CAMPOS.map((c) => `${c}: ${PROV_LABEL[PROV_DO_CAMPO[c]]}`).join(" · ")}>
+                  {PARAMS_TERRITORIAIS_CAMPOS.every((c) => PROV_DO_CAMPO[c] === PROV.PREMISSA)
+                    ? "Informado pela equipe (0–100)"
+                    : "Critérios adicionais (0–100)"}
+                </th>
+                <th className="num" colSpan={3}>Resultado</th>
+              </tr>
+              <tr>
+                <th className="num">Eleitorado</th>
+                <th className="num">% do total</th>
+                <th className="num">Comparecimento {d.anoReferencia}</th>
+                <th className="num fr-th-premissa">Histórico</th>
+                <th className="num fr-th-premissa">Presença</th>
+                <th className="num fr-th-premissa">Capacidade</th>
+                <th className="num fr-th-premissa">Logística</th>
+                <th className="num">% da meta</th>
+                <th className="num">Meta territorial</th>
+                <th className="num">Penetração exigida</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.territories.map((t) => {
+                const alto = t.penetracaoNecessaria > 0.35;
+                const params = getParamsTerritorio(cfg, t.id);
+                return (
+                  <tr key={t.id} className={cx(t.resto && "resto")}>
+                    <td title={t.name}>{t.name}{t.resto && <span className="fr-hint"> (não priorizado)</span>}</td>
+                    <td className="num">{fmtInt(t.eleitores)}</td>
+                    <td className="num">{fmtPct(t.eleitoradoShare)}</td>
+                    <td className="num">{fmtPct(t.comparecimento)}</td>
+                    {PARAMS_TERRITORIAIS_CAMPOS.map((campo) => (
+                      <td className="num" key={campo}>
+                        <input className="fr-param-input" type="number" min={0} max={100} step={5}
+                          aria-label={`${campo} em ${t.name}`}
+                          value={Math.round(params[campo] * 100)}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            if (Number.isFinite(v)) setParam(t.id, campo, Math.max(0, Math.min(100, v)) / 100);
+                          }} />
                       </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td>Total</td>
-                  <td className="num">{fmtDec(d.territories.reduce((a, t) => a + t.eleitoradoM, 0), 2)} M</td>
-                  <td className="num">100,0%</td>
-                  <td />
-                  <td className="num">{fmtPct(d.territories.reduce((a, t) => a + t.share, 0))}</td>
-                  <td className="num">{fmtInt(d.territories.reduce((a, t) => a + t.metaTerritorial, 0))}</td>
-                  <td />
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          {detalhado && (
-            <>
-              <div className="fr-hint" style={{ marginTop: 14, marginBottom: 6 }}>Municípios priorizados na distribuição:</div>
-              <div className="fr-chip-list">
-                {SP_MUNICIPIOS.map((m) => (
-                  <button key={m.id} type="button" aria-pressed={cfg.territoriosSelecionados.includes(m.id)}
-                    className={cx("fr-chip", cfg.territoriosSelecionados.includes(m.id) && "on")}
-                    onClick={() => toggleTerritorio(m.id)}>
-                    {m.name}
-                  </button>
-                ))}
-              </div>
-              <label className="fr-row" style={{ marginTop: 12, fontSize: 12.5 }}>
-                <input type="checkbox" checked={cfg.incluirRestoDoEstado}
-                  onChange={(e) => update({ incluirRestoDoEstado: e.target.checked })} />
-                Incluir o "Restante do estado" na distribuição
-              </label>
-              <p className="fr-hint" style={{ marginTop: 4 }}>
-                Desligado, 100% da meta é atribuída apenas aos municípios priorizados — o que assume,
-                implicitamente, zero voto no restante de {getUf(cfg).name}.
-              </p>
-            </>
-          )}
+                    ))}
+                    <td className="num">{fmtPct(t.share)}</td>
+                    <td className="num" style={{ fontWeight: 700 }}>{fmtInt(t.metaTerritorial)}</td>
+                    <td className="num" style={{ color: alto ? "var(--danger-ink)" : undefined, fontWeight: alto ? 700 : 400 }}>
+                      {fmtPct(t.penetracaoNecessaria, 2)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>Total</td>
+                <td className="num">{fmtInt(d.territories.reduce((a, t) => a + t.eleitores, 0))}</td>
+                <td className="num">100,0%</td>
+                <td className="num">{fmtPct(d.comparecimentoHistorico)}</td>
+                {PARAMS_TERRITORIAIS_CAMPOS.map((c) => <td key={c} />)}
+                <td className="num">{fmtPct(d.territories.reduce((a, t) => a + t.share, 0))}</td>
+                <td className="num">{fmtInt(d.territories.reduce((a, t) => a + t.metaTerritorial, 0))}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div className="fr-row fr-between fr-row-wrap" style={{ marginTop: 10, gap: 8 }}>
+          <span className="fr-hint">
+            As quatro colunas do meio não têm fonte externa — são o que a equipe sabe do território.
+            Começam neutras (50) e só passam a pesar quando você as diferencia.
+            {paramsInformados > 0 && ` ${paramsInformados} território(s) informado(s).`}
+          </span>
+          <button className="fr-btn sm" onClick={limparParams} disabled={paramsInformados === 0}>
+            <RotateCcw size={12} /> Voltar ao neutro
+          </button>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <Fonte id="ELEITORADO_2026" compacto />
         </div>
 
-        <div className="fr-card">
-          <h2 className="fr-h2">Pesos territoriais</h2>
-          <ProvBadge type={PROV.PREMISSA} />
-          <p className="fr-desc" style={{ marginTop: 6 }}>
-            Os seis critérios são normalizados de 0 a 1 antes da ponderação, então os pesos são
-            diretamente comparáveis entre si.
-          </p>
-          <div className="fr-stack" style={{ marginTop: 10, gap: 12 }}>
-            {Object.entries(cfg.territorialWeights).map(([key, val]) => (
-              <SliderField key={key} label={WEIGHT_LABELS[key] || key} value={val}
-                onChange={(v) => setWeight(key, v)} min={0} max={0.6} step={0.01} />
-            ))}
-          </div>
-          <div className="fr-divider" />
-          <div className="fr-field">
-            <label className="fr-field-label" htmlFor="hist-ref">
-              <span>Eleição de referência para o comparecimento</span><ProvBadge type={PROV.HISTORICO} />
+        {detalhado && (
+          <>
+            <div className="fr-hint" style={{ marginTop: 14, marginBottom: 6 }}>Municípios priorizados na distribuição:</div>
+            <div className="fr-chip-list">
+              {getMunicipiosDaUf(cfg.uf).map((m) => (
+                <button key={m.id} type="button" aria-pressed={cfg.territoriosSelecionados.includes(m.id)}
+                  className={cx("fr-chip", cfg.territoriosSelecionados.includes(m.id) && "on")}
+                  onClick={() => toggleTerritorio(m.id)}>
+                  {m.name}
+                </button>
+              ))}
+            </div>
+            <label className="fr-row" style={{ marginTop: 12, fontSize: 12.5 }}>
+              <input type="checkbox" checked={cfg.incluirRestoDoEstado}
+                onChange={(e) => update({ incluirRestoDoEstado: e.target.checked })} />
+              Incluir o "Restante do estado" na distribuição
             </label>
-            <select id="hist-ref" value={cfg.histRefYear} onChange={(e) => update({ histRefYear: Number(e.target.value) })}>
-              <option value={2022}>2022</option>
-              <option value={2018}>2018</option>
-            </select>
-            <span className="fr-hint">Alimenta o critério "Comparecimento local" e o teto de votos esperados.</span>
-          </div>
-          <div className="fr-row fr-between" style={{ marginTop: 12 }}>
-            <span className="fr-hint">Soma atual: <b className="fr-num">{fmtPct(d.weightSum)}</b> (ideal: 100%)</span>
-            <button className="fr-btn sm" onClick={normalizarPesos} disabled={Math.abs(d.weightSum - 1) < 0.005}>
-              <RefreshCw size={12} /> Normalizar
-            </button>
-          </div>
+            <p className="fr-hint" style={{ marginTop: 4 }}>
+              Desligado, 100% da meta é atribuída apenas aos municípios priorizados — o que assume,
+              implicitamente, zero voto no restante de {getUf(cfg).name}.
+            </p>
+          </>
+        )}
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">Pesos territoriais</h2>
+        <ProvBadge type={PROV.PREMISSA} />
+        <p className="fr-desc" style={{ marginTop: 6 }}>
+          Os seis critérios são normalizados de 0 a 1 antes da ponderação, então os pesos são
+          diretamente comparáveis entre si.
+        </p>
+        <div className="fr-grid fr-grid-3" style={{ marginTop: 10 }}>
+          {Object.entries(cfg.territorialWeights).map(([key, val]) => (
+            <SliderField key={key} label={WEIGHT_LABELS[key] || key} value={val}
+              onChange={(v) => setWeight(key, v)} min={0} max={0.6} step={0.01} />
+          ))}
+        </div>
+        <div className="fr-divider" />
+        <div className="fr-field">
+          <label className="fr-field-label" htmlFor="hist-ref">
+            <span>Eleição de referência para o comparecimento</span>
+            <ProvBadge type={PROV.HISTORICO} fonte={`COMPARECIMENTO_${d.anoReferencia}`} />
+          </label>
+          <select id="hist-ref" value={cfg.histRefYear} onChange={(e) => update({ histRefYear: Number(e.target.value) })}>
+            {ANOS_REFERENCIA.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <span className="fr-hint">
+            Define o comparecimento de cada território e, com ele, os votos esperados
+            ({fmtInt(Math.round(d.eleitoradoEfetivo))} nesta configuração — {fmtPct(d.comparecimentoHistorico)} do eleitorado).
+            Não altera a premissa de abstenção, que é sua e fica em Meta Eleitoral.
+          </span>
+          <div style={{ marginTop: 6 }}><Fonte id={`COMPARECIMENTO_${d.anoReferencia}`} compacto /></div>
+        </div>
+        <div className="fr-row fr-between" style={{ marginTop: 12 }}>
+          <span className="fr-hint">Soma atual: <b className="fr-num">{fmtPct(d.weightSum)}</b> (ideal: 100%)</span>
+          <button className="fr-btn sm" onClick={normalizarPesos} disabled={Math.abs(d.weightSum - 1) < 0.005}>
+            <RefreshCw size={12} /> Normalizar
+          </button>
         </div>
       </div>
 
@@ -1141,13 +1607,13 @@ function ViewTerritorios({ cfg, update, derived }) {
           <div style={{ height: 320, marginTop: 12 }}>
             <ResponsiveContainer width="100%" height="100%">
               <ScatterChart margin={{ top: 10, right: 24, bottom: 24, left: 8 }}>
-                <CartesianGrid stroke="#D7DBE3" />
+                <CartesianGrid stroke="#E4E4E6" />
                 <XAxis type="number" dataKey="potencial" name="Potencial"
-                  label={{ value: "Potencial (score)", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4C5468" } }}
-                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4C5468" }} />
+                  label={{ value: "Potencial (score)", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4B4D53" } }}
+                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }} />
                 <YAxis type="number" dataKey="esforco" name="Esforço"
-                  label={{ value: "Esforço logístico", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4C5468" } }}
-                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4C5468" }} />
+                  label={{ value: "Esforço logístico", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4B4D53" } }}
+                  tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }} />
                 <ZAxis range={[90, 90]} />
                 <Tooltip cursor={{ strokeDasharray: "3 3" }}
                   contentStyle={{ fontSize: 12, fontFamily: "IBM Plex Sans" }}
@@ -1157,14 +1623,14 @@ function ViewTerritorios({ cfg, update, derived }) {
                     if (!payload?.length) return null;
                     const p = payload[0].payload;
                     return (
-                      <div style={{ background: "#fff", border: "1px solid #D7DBE3", padding: "8px 10px", fontSize: 12, borderRadius: 3 }}>
+                      <div style={{ background: "#fff", border: "1px solid #E4E4E6", padding: "8px 10px", fontSize: 12, borderRadius: 3 }}>
                         <b>{p.name}</b><br />Potencial: {p.potencial}<br />Esforço: {p.esforco}
                       </div>
                     );
                   }} />
-                <ReferenceLine x={matrixData.length ? matrixData.reduce((a, m) => a + m.potencial, 0) / matrixData.length : 0} stroke="#9AA2B4" />
-                <ReferenceLine y={matrixData.length ? matrixData.reduce((a, m) => a + m.esforco, 0) / matrixData.length : 0} stroke="#9AA2B4" />
-                <Scatter data={matrixData} fill="#21418F" />
+                <ReferenceLine x={matrixData.length ? matrixData.reduce((a, m) => a + m.potencial, 0) / matrixData.length : 0} stroke="#9A9CA2" />
+                <ReferenceLine y={matrixData.length ? matrixData.reduce((a, m) => a + m.esforco, 0) / matrixData.length : 0} stroke="#9A9CA2" />
+                <Scatter data={matrixData} fill="#856616" />
               </ScatterChart>
             </ResponsiveContainer>
           </div>
@@ -1278,7 +1744,10 @@ function ViewPublicos({ cfg, update, derived }) {
             aria-label="Novo segmento temático" value={novoTema}
             onChange={(e) => setNovoTema(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") addTemaCustom(); }} />
-          <button className="fr-btn sm" onClick={addTemaCustom}><Plus size={13} /> Adicionar</button>
+          <button className="fr-btn sm" onClick={addTemaCustom} disabled={!novoTema.trim()}
+            title={novoTema.trim() ? undefined : "Escreva o nome do segmento primeiro"}>
+            <Plus size={13} /> Adicionar
+          </button>
         </div>
       </div>
 
@@ -1696,7 +2165,28 @@ function ViewOrcamento({ cfg, update, derived }) {
    VIEW: CENÁRIOS
    ========================================================================== */
 
+/** Mostra o valor que o cenário ativo produz e o quanto ele desloca a premissa. */
+function DeltaCenario({ rotulo, base, valor, pct = false, multiplicador = false }) {
+  const delta = valor - base;
+  const neutro = Math.abs(delta) < 1e-9;
+  const fmt = pct ? fmtPct : (v) => `${fmtDec(v, 2)}×`;
+  return (
+    <div>
+      <div className="fr-kpi-label">{rotulo}</div>
+      <div className="fr-num" style={{ fontSize: 16, marginTop: 2 }}>{fmt(valor)}</div>
+      <div className="fr-hint" style={{ color: neutro ? undefined : "var(--brand-deep)" }}>
+        {neutro
+          ? "sem alteração"
+          : multiplicador
+            ? `${delta > 0 ? "+" : ""}${fmtPct(delta, 0)} sobre o informado`
+            : `${delta > 0 ? "+" : "−"}${fmtPct(Math.abs(delta), 1)} sobre ${fmt(base)}`}
+      </div>
+    </div>
+  );
+}
+
 function ViewCenarios({ cfg, update, derived }) {
+  const d = derived;
   const allPresets = [
     SCENARIO_PRESETS.central, SCENARIO_PRESETS.conservador, SCENARIO_PRESETS.otimista,
     SCENARIO_PRESETS.maior_mobilizacao, SCENARIO_PRESETS.menor_conversao, SCENARIO_PRESETS.restricao_territorial,
@@ -1727,6 +2217,7 @@ function ViewCenarios({ cfg, update, derived }) {
 
       <div className="fr-card">
         <h2 className="fr-h2">Cenário ativo</h2>
+        <p className="fr-desc">Um cenário desloca as premissas do plano inteiro. Trocar aqui recalcula todas as telas.</p>
         <div className="fr-chip-list" style={{ marginTop: 10 }}>
           {allPresets.map((p) => (
             <button key={p.id} type="button" aria-pressed={cfg.scenarioId === p.id}
@@ -1734,6 +2225,35 @@ function ViewCenarios({ cfg, update, derived }) {
               {p.label}
             </button>
           ))}
+        </div>
+        {/* Sem este bloco, clicar num cenário mudava só a borda de um chip: a
+            consequência do clique acontecia em outras telas, fora da vista. */}
+        <div className="fr-cenario-efeito" aria-live="polite">
+          <div className="fr-row fr-between fr-row-wrap" style={{ gap: 8 }}>
+            <b>{d.preset.label}</b>
+            <span className="fr-hint">
+              {d.preset.custom ? "Cenário criado por você" : "Cenário predefinido"}
+            </span>
+          </div>
+          <div className="fr-grid fr-grid-4" style={{ marginTop: 10, gap: 10 }}>
+            <DeltaCenario rotulo="Abstenção" base={cfg.abstentionRate} valor={d.scenario.abstentionRate} pct />
+            <DeltaCenario rotulo="Fidelidade" base={cfg.fidelityRate} valor={d.scenario.fidelityRate} pct />
+            <DeltaCenario rotulo="Conversão dos canais" base={1} valor={d.scenario.conversionMultiplier} multiplicador />
+            <DeltaCenario rotulo="Custo" base={1} valor={d.scenario.costMultiplier} multiplicador />
+          </div>
+          <div className="fr-divider" />
+          <div className="fr-line">
+            <span>Contatos necessários neste cenário</span>
+            <b className="fr-num">{fmtSig(d.totalContactsNeeded)}</b>
+          </div>
+          <div className="fr-line">
+            <span>Meta diária neste cenário</span>
+            <b className="fr-num">{fmtSig(d.dailyContacts)}</b>
+          </div>
+          <div className="fr-line">
+            <span>Custo estimado neste cenário</span>
+            <b className="fr-num">{fmtSig(d.totalCost)}</b>
+          </div>
         </div>
       </div>
 
@@ -1756,12 +2276,15 @@ function ViewCenarios({ cfg, update, derived }) {
                     <td style={{ fontWeight: active ? 700 : 400 }}>
                       {p.label}{p.custom && <span className="fr-hint"> (personalizado)</span>}
                     </td>
-                    <td className="num">{fmtInt(s.adjustedGoal)}</td>
-                    <td className="num">{fmtInt(s.totalContacts)}</td>
-                    <td className="num">{fmtInt(s.dailyContacts)}</td>
+                    {/* Algarismos significativos, como no painel: a comparação
+                        entre cenários não depende do sétimo dígito, e exibi-lo
+                        sugeriria uma precisão que a taxa de conversão não tem. */}
+                    <td className="num">{fmtSig(s.adjustedGoal)}</td>
+                    <td className="num">{fmtSig(s.totalContacts)}</td>
+                    <td className="num">{fmtSig(s.dailyContacts)}</td>
                     <td className="num">{fmtInt(s.capacity)}</td>
                     <td className="num" style={{ color: s.gap < 0 ? "var(--danger-ink)" : "var(--oficial-ink)", fontWeight: 700 }}>
-                      {fmtSigned(s.gap)}
+                      {fmtSigned(s.gap, fmtSig)}
                     </td>
                     <td>
                       {p.custom && (
@@ -1809,20 +2332,14 @@ function ViewCenarios({ cfg, update, derived }) {
    (4) os limites acompanham a configuração atual.
    ========================================================================== */
 
-function defaultBounds(cfg) {
-  return {
-    abstentionMin: Math.max(0, Math.round((cfg.abstentionRate - 0.07) * 100) / 100),
-    abstentionMax: Math.min(1, Math.round((cfg.abstentionRate + 0.07) * 100) / 100),
-    fidelityMin: Math.max(0, Math.round((cfg.fidelityRate - 0.12) * 100) / 100),
-    fidelityMax: Math.min(1, Math.round((cfg.fidelityRate + 0.08) * 100) / 100),
-    conversionMultMin: 0.7,
-    conversionMultMax: 1.3,
-    iterations: 3000,
-  };
-}
-
 function ViewSimulacoes({ cfg, derived }) {
   const [bounds, setBounds] = useState(() => defaultBounds(cfg));
+  // O botão "Resincronizar" só faz sentido quando os limites já divergiram do
+  // plano; antes ele ficava sempre habilitado e clicá-lo não produzia nada.
+  const boundsSincronizados = useMemo(() => {
+    const alvo = defaultBounds(cfg);
+    return Object.keys(alvo).every((k) => Math.abs((bounds[k] ?? 0) - alvo[k]) < 1e-9);
+  }, [cfg, bounds]);
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
   const [staleSince, setStaleSince] = useState(false);
@@ -1869,7 +2386,9 @@ function ViewSimulacoes({ cfg, derived }) {
       <div className="fr-card">
         <div className="fr-row fr-between fr-row-wrap" style={{ marginBottom: 10 }}>
           <h2 className="fr-h2">Limites das premissas</h2>
-          <button className="fr-btn sm" onClick={() => setBounds(defaultBounds(cfg))}>
+          <button className="fr-btn sm" onClick={() => setBounds(defaultBounds(cfg))}
+            disabled={boundsSincronizados}
+            title={boundsSincronizados ? "Os limites já refletem o plano atual" : "Recalcula os limites a partir das premissas atuais"}>
             <RefreshCw size={12} /> Resincronizar com o plano
           </button>
         </div>
@@ -1923,16 +2442,16 @@ function ViewSimulacoes({ cfg, derived }) {
             <div style={{ height: 320, marginTop: 12 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={histData} margin={{ top: 10, right: 20, left: 0, bottom: 22 }}>
-                  <CartesianGrid stroke="#D7DBE3" vertical={false} />
-                  <XAxis dataKey="faixa" tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4C5468" }}
+                  <CartesianGrid stroke="#E4E4E6" vertical={false} />
+                  <XAxis dataKey="faixa" tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }}
                     interval="preserveStartEnd"
-                    label={{ value: "Contatos necessários", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4C5468" } }} />
-                  <YAxis tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4C5468" }}
-                    label={{ value: "Simulações", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4C5468" } }} />
+                    label={{ value: "Contatos necessários", position: "insideBottom", offset: -12, style: { fontSize: 11, fill: "#4B4D53" } }} />
+                  <YAxis tick={{ fontSize: 10, fontFamily: "IBM Plex Mono", fill: "#4B4D53" }}
+                    label={{ value: "Simulações", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#4B4D53" } }} />
                   <Tooltip contentStyle={{ fontSize: 12 }}
                     formatter={(v) => [fmtInt(v), "simulações"]}
                     labelFormatter={(l) => `Faixa ~${l} contatos`} />
-                  <Bar dataKey="contagem" fill="#3D6BA8" radius={[2, 2, 0, 0]} />
+                  <Bar dataKey="contagem" fill="#2F5D96" radius={[2, 2, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -1980,66 +2499,113 @@ function ViewSimulacoes({ cfg, derived }) {
 }
 
 /* ============================================================================
-   VIEW: DADOS — o registro agora declara o STATUS real de cada conector.
-   A versão anterior marcava "Eleitorado por UF" como oficial enquanto usava
-   uma tabela congelada no código.
+   VIEW: DADOS — o registro declara, indicador por indicador, o arquivo de onde
+   o número veio, a data de referência e como foi apurado. A versão anterior
+   marcava "Eleitorado por UF" como oficial enquanto usava uma tabela inventada
+   no código, com erros de até 9 pontos percentuais no comparecimento.
    ========================================================================== */
 
 const DATA_SOURCE_REGISTRY = [
   {
-    indicador: "Eleitorado por UF", usadoHoje: "Tabela congelada em src/engine.js (ordem de grandeza real)",
-    fonteAlvo: "TSE — dataset \"Eleitorado Atual\"", nivel: "UF", status: "nao-conectado", tipo: PROV.HISTORICO,
+    indicador: "Eleitorado por UF e por município", usadoHoje: "Arquivo perfil_eleitorado_2026.zip do TSE, somado por UF e por município",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.OFICIAL, fonte: "ELEITORADO_2026",
   },
   {
-    indicador: "Vagas por circunscrição", usadoHoje: "Composição vigente da Câmara e das Assembleias, congelada no código",
-    fonteAlvo: "TSE — resolução de distribuição de vagas do pleito", nivel: "UF", status: "nao-conectado", tipo: PROV.HISTORICO,
+    indicador: "Zonas eleitorais", usadoHoje: "Contagem de NR_ZONA distintos no mesmo arquivo de eleitorado",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "Município", status: "arquivo", tipo: PROV.OFICIAL, fonte: "ELEITORADO_2026",
   },
   {
-    indicador: "Comparecimento e abstenção", usadoHoje: "Referência 2022/2018 por UF, congelada no código",
-    fonteAlvo: "TSE — resultados por seção", nivel: "UF", status: "nao-conectado", tipo: PROV.HISTORICO,
+    indicador: "Comparecimento e abstenção (2022)", usadoHoje: "detalhe_votacao_munzona_2022.zip — QT_COMPARECIMENTO ÷ QT_APTOS",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.HISTORICO, fonte: "COMPARECIMENTO_2022",
   },
   {
-    indicador: "Recorte municipal", usadoHoje: "8 municípios de SP + bucket \"Restante do estado\"",
-    fonteAlvo: "TSE (eleitorado por município) + IBGE (malhas)", nivel: "Município", status: "nao-conectado", tipo: PROV.HISTORICO,
+    indicador: "Comparecimento e abstenção (2018)", usadoHoje: "detalhe_votacao_munzona_2018.zip — mesmo método",
+    fonteAlvo: "TSE — Portal de Dados Abertos", nivel: "UF / Município", status: "arquivo", tipo: PROV.HISTORICO, fonte: "COMPARECIMENTO_2018",
   },
   {
-    indicador: "Datas do calendário eleitoral", usadoHoje: "Lei 9.504/1997, art. 1º",
-    fonteAlvo: "Resoluções do TSE para o pleito", nivel: "Nacional", status: "lei", tipo: PROV.OFICIAL,
+    indicador: "Cadeiras na Câmara por UF", usadoHoje: "513 cadeiras, distribuição de 2022 mantida pelo STF para o pleito de 2026",
+    fonteAlvo: "STF / TSE", nivel: "UF", status: "lei", tipo: PROV.OFICIAL, fonte: "VAGAS_CAMARA_2026",
+  },
+  {
+    indicador: "Cadeiras na Assembleia Legislativa", usadoHoje: "Calculado pela regra do art. 27 da Constituição, não tabelado",
+    fonteAlvo: "Constituição Federal", nivel: "UF", status: "lei", tipo: PROV.OFICIAL, fonte: "ASSEMBLEIA_CF27",
+  },
+  {
+    indicador: "Datas do calendário eleitoral", usadoHoje: "Calculadas pela Lei 9.504/1997, art. 1º, a partir do ano do pleito",
+    fonteAlvo: "Resoluções do TSE para o pleito", nivel: "Nacional", status: "lei", tipo: PROV.OFICIAL, fonte: "DATAS_LEI_9504",
   },
   {
     indicador: "Regra de distribuição de vagas", usadoHoje: "Lei 9.504/1997, arts. 106–109 (redação da Lei 14.211/2021)",
     fonteAlvo: "Resoluções do TSE para o pleito", nivel: "Nacional", status: "lei", tipo: PROV.OFICIAL,
   },
   {
+    indicador: "Histórico, presença, capacidade e logística por território", usadoHoje: "Informados pela equipe. Começam neutros (50) — não existe fonte pública para eles",
+    fonteAlvo: "Conhecimento próprio da campanha", nivel: "Território", status: "usuario", tipo: PROV.PREMISSA,
+  },
+  {
     indicador: "Taxas de conversão por canal", usadoHoje: "Inseridas pela equipe de campanha",
     fonteAlvo: "Histórico próprio da campanha", nivel: "Canal", status: "usuario", tipo: PROV.PREMISSA,
   },
   {
+    indicador: "Abstenção e fidelidade projetadas", usadoHoje: "Premissa da equipe para o pleito que vem, não medição",
+    fonteAlvo: "Pesquisa própria + série histórica", nivel: "Circunscrição", status: "usuario", tipo: PROV.PREMISSA,
+  },
+  {
     indicador: "Indicadores socioeconômicos", usadoHoje: "Não utilizado em nenhum cálculo",
-    fonteAlvo: "IBGE — Censo e estimativas", nivel: "Município", status: "nao-conectado", tipo: PROV.ESTIMATIVA,
+    fonteAlvo: "IBGE — Censo 2022", nivel: "Município", status: "nao-conectado", tipo: PROV.HISTORICO,
   },
 ];
 
 const STATUS_BADGE = {
   "nao-conectado": { cls: "perigo", label: "Não conectado" },
+  arquivo: { cls: "oficial", label: "Arquivo oficial" },
   lei: { cls: "oficial", label: "Definido em lei" },
   usuario: { cls: "premissa", label: "Informado pela equipe" },
 };
 
-function ViewDados() {
+function ViewDados({ derived }) {
+  const d = derived;
   return (
     <div className="fr-stack">
       <SectionHead eyebrow="Rastreabilidade" title="Dados"
-        desc="Toda métrica calculada declara sua fonte. Uma estimativa nunca é exibida como se fosse dado oficial." />
+        desc="De onde vem cada número: órgão, arquivo, data de referência e como foi apurado. Uma estimativa nunca é exibida como se fosse dado oficial." />
 
-      <div className="fr-alert atencao">
-        <AlertTriangle size={15} />
+      <div className="fr-alert info">
+        <Info size={15} />
         <span>
-          <b>Nenhum conector de dados está ligado nesta versão.</b> Os números de eleitorado,
-          comparecimento e vagas são uma fotografia congelada no código-fonte, com ordem de grandeza
-          real, mas sem data de atualização e sem consulta ao TSE. Antes de qualquer uso operacional,
-          conecte as fontes abaixo.
+          <b>Os dados vêm dos arquivos oficiais do TSE, extraídos em {fmtDataBR(FONTES.ELEITORADO_2026.dataColeta)}.</b>{" "}
+          São uma fotografia, não uma consulta em tempo real: o app não faz requisição nenhuma ao
+          navegar. Para atualizar, rode <span className="fr-mono">node scripts/gerar-dados-tse.mjs</span>,
+          que rebaixa os arquivos e regenera <span className="fr-mono">src/dados-tse.js</span>.
         </span>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">As fontes usadas</h2>
+        <p className="fr-desc">Cada uma com o método de apuração e o link para o material original.</p>
+        <div className="fr-grid fr-grid-3" style={{ marginTop: 12 }}>
+          {Object.keys(FONTES).map((id) => (
+            <div key={id}>
+              <h3 className="fr-h2" style={{ fontSize: 13 }}>{FONTES[id].rotulo}</h3>
+              <div style={{ marginTop: 6 }}><Fonte id={id} /></div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="fr-card">
+        <h2 className="fr-h2">Conferência: o que este app afirma hoje</h2>
+        <p className="fr-desc">Números apurados agora, com a configuração atual, para você comparar com a fonte.</p>
+        <div className="fr-grid fr-grid-4" style={{ marginTop: 12 }}>
+          <Kpi label="Eleitorado nacional apurado" value={fmtInt(ELEITORADO_NACIONAL)} prov={PROV.OFICIAL} fonte="ELEITORADO_2026"
+            sub="27 UFs, sem o eleitorado no exterior" />
+          <Kpi label="Eleitorado da circunscrição" value={fmtInt(d.eleitoradoElegivel)} prov={PROV.OFICIAL} fonte="ELEITORADO_2026" />
+          <Kpi label={`Comparecimento medido em ${d.anoReferencia}`} value={fmtPct(d.comparecimentoHistorico)} prov={PROV.HISTORICO}
+            fonte={`COMPARECIMENTO_${d.anoReferencia}`}
+            sub={`abstenção de ${fmtPct(1 - d.comparecimentoHistorico)}`} />
+          <Kpi label="Cadeiras em disputa" value={fmtInt(getVagas({ office: d.office.id, uf: d.uf.code, proportional: {} }))}
+            prov={PROV.OFICIAL} fonte="VAGAS_CAMARA_2026" sub={`${d.office.label} — ${d.uf.name}`} />
+        </div>
       </div>
 
       <div className="fr-grid fr-grid-3">
@@ -2064,7 +2630,7 @@ function ViewDados() {
         <div className="fr-scroll-x" style={{ marginTop: 10 }}>
           <table className="fr-table">
             <thead>
-              <tr><th>Indicador</th><th>O que é usado hoje</th><th>Fonte definitiva</th><th>Nível</th><th>Status</th><th>Classificação</th></tr>
+              <tr><th>Indicador</th><th>O que é usado hoje</th><th>Fonte</th><th>Nível</th><th>Status</th><th>Classificação</th></tr>
             </thead>
             <tbody>
               {DATA_SOURCE_REGISTRY.map((r, i) => {
@@ -2073,10 +2639,15 @@ function ViewDados() {
                   <tr key={i}>
                     <td><b>{r.indicador}</b></td>
                     <td>{r.usadoHoje}</td>
-                    <td>{r.fonteAlvo}</td>
+                    <td>
+                      {r.fonte
+                        ? <a href={FONTES[r.fonte].url} target="_blank" rel="noreferrer noopener">{r.fonteAlvo}</a>
+                        : r.fonteAlvo}
+                      {r.fonte && <div className="fr-hint">ref. {fmtDataBR(FONTES[r.fonte].dataReferencia)}</div>}
+                    </td>
                     <td>{r.nivel}</td>
                     <td><span className={cx("fr-badge", badge.cls)}><span className="dot" />{badge.label}</span></td>
-                    <td><ProvBadge type={r.tipo} /></td>
+                    <td><ProvBadge type={r.tipo} fonte={r.fonte} /></td>
                   </tr>
                 );
               })}
@@ -2113,6 +2684,7 @@ function downloadBlob(filename, content, mime) {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename, bytes: blob.size };
 }
 function toCSV(rows) {
   return rows.map((r) => r.map((cell) => {
@@ -2145,10 +2717,21 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
     setModels([]); setLog([]); onResetConfig();
   };
 
+  // Exportar não dava sinal nenhum: o arquivo baixava em silêncio e, se o
+  // navegador guardasse na pasta de downloads sem avisar, o clique parecia
+  // não ter feito nada. Agora cada exportação confirma nome e tamanho.
+  const [ultimoArquivo, setUltimoArquivo] = useState(null);
+  const confirmar = (r) => setUltimoArquivo({ ...r, em: new Date() });
+
   const exportJSON = () => {
-    downloadBlob("plano-operacional.json", JSON.stringify({
+    confirmar(downloadBlob("plano-operacional.json", JSON.stringify({
       geradoEm: new Date().toISOString(),
-      aviso: "Dados de eleitorado e comparecimento são referência congelada no código, não consulta ao TSE.",
+      fontes: Object.fromEntries(Object.entries(FONTES).map(([id, f]) => [id, {
+        orgao: f.orgao, conjunto: f.dataset, arquivo: f.arquivo || null,
+        dataReferencia: f.dataReferencia, extraidoEm: f.dataColeta, url: f.url, metodo: f.metodo,
+      }])),
+      aviso: "Eleitorado e comparecimento vêm dos arquivos do Portal de Dados Abertos do TSE, com as datas de referência declaradas em 'fontes'. Não é consulta em tempo real. Histórico, presença, capacidade e logística por território são premissas da equipe, sem fonte externa.",
+      anoReferenciaComparecimento: d.anoReferencia,
       cargo: d.office.label, uf: d.uf.name, cenario: d.preset.label,
       metaVotos: cfg.voteGoal, metaAjustada: d.adjustedGoal,
       eleitoradoCircunscricao: d.eleitoradoElegivel, votosEsperados: d.eleitoradoEfetivo,
@@ -2172,26 +2755,26 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
         eleito: d.proportionalResult.minhaLinha?.elected ?? null,
       } : null,
       alertas: d.alerts,
-    }, null, 2), "application/json");
+    }, null, 2), "application/json"));
   };
-  const exportTerritoriosCSV = () => downloadBlob("plano-territorial.csv", toCSV([
+  const exportTerritoriosCSV = () => confirmar(downloadBlob("plano-territorial.csv", toCSV([
     ["Território", "Priorizado", "Eleitorado (M)", "% do eleitorado", "% da meta", "Meta territorial", "Penetração exigida"],
     ...d.territories.map((t) => [
-      t.name, t.resto ? "não" : "sim", fmtDec(t.eleitoradoM, 2), fmtPct(t.eleitoradoShare),
+      t.name, t.resto ? "não" : "sim", t.eleitores, fmtPct(t.eleitoradoShare),
       fmtPct(t.share), Math.round(t.metaTerritorial), fmtPct(t.penetracaoNecessaria, 2),
     ]),
-  ]), "text/csv");
-  const exportCanaisCSV = () => downloadBlob("plano-canais.csv", toCSV([
+  ]), "text/csv"));
+  const exportCanaisCSV = () => confirmar(downloadBlob("plano-canais.csv", toCSV([
     ["Canal", "Ativo", "Participação", "Conversão", "Contatos necessários", "Unidade operacional", "Quantidade"],
     ...d.channelResults.map((c) => [
       c.label, c.enabled ? "sim" : "não", fmtPct(c.share), fmtPct(c.conversion),
       Math.round(c.contactsNeeded), c.unit, Math.round(c.actionsNeeded),
     ]),
-  ]), "text/csv");
-  const exportLogCSV = () => downloadBlob("registro-operacional.csv", toCSV([
+  ]), "text/csv"));
+  const exportLogCSV = () => confirmar(downloadBlob("registro-operacional.csv", toCSV([
     ["Data", "Território", "Atividade", "Planejado", "Realizado"],
     ...log.map((l) => [l.data, l.territorio, l.atividade, l.planejado, l.realizado]),
-  ]), "text/csv");
+  ]), "text/csv"));
 
   const trackChart = log
     .slice()
@@ -2218,11 +2801,25 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
           <button className="fr-btn" onClick={exportTerritoriosCSV}><Download size={14} /> CSV — territórios</button>
           <button className="fr-btn" onClick={exportCanaisCSV}><Download size={14} /> CSV — canais</button>
           <button className="fr-btn" onClick={exportLogCSV} disabled={!log.length}><Download size={14} /> CSV — registro</button>
-          <button className="fr-btn" onClick={() => window.print()}><FileText size={14} /> Imprimir / PDF</button>
+          <button className="fr-btn" onClick={() => { window.print(); confirmar({ filename: null, impressao: true }); }}>
+            <FileText size={14} /> Imprimir / PDF
+          </button>
+        </div>
+        <div className="fr-export-status" role="status" aria-live="polite">
+          {ultimoArquivo ? (
+            <span className="fr-export-ok">
+              <CheckCircle2 size={14} />
+              {ultimoArquivo.impressao
+                ? "Diálogo de impressão aberto."
+                : <>Gerado <b className="fr-mono">{ultimoArquivo.filename}</b> ({fmtInt(Math.round(ultimoArquivo.bytes / 1024))} kB) às {ultimoArquivo.em.toLocaleTimeString("pt-BR")} — procure na pasta de downloads do navegador.</>}
+            </span>
+          ) : (
+            <span className="fr-hint">Nenhum arquivo gerado nesta sessão ainda.</span>
+          )}
         </div>
         <p className="fr-hint" style={{ marginTop: 8 }}>
-          O JSON inclui os alertas ativos e o aviso de proveniência dos dados. A impressão usa uma
-          folha de estilo própria, sem a navegação.
+          O JSON inclui os alertas ativos e o registro completo de fontes, com data de referência e
+          método de apuração de cada dado. A impressão usa uma folha de estilo própria, sem a navegação.
         </p>
       </div>
 
@@ -2298,13 +2895,13 @@ function ViewRelatorios({ cfg, derived, onLoadModel, onResetConfig, models, setM
             <div style={{ height: 240, marginTop: 14 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={trackChart} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid stroke="#D7DBE3" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#4C5468" }} />
-                  <YAxis tick={{ fontSize: 10, fill: "#4C5468" }} tickFormatter={(v) => fmtInt(v)} />
+                  <CartesianGrid stroke="#E4E4E6" />
+                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#4B4D53" }} />
+                  <YAxis tick={{ fontSize: 10, fill: "#4B4D53" }} tickFormatter={(v) => fmtInt(v)} />
                   <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => fmtInt(v)} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line type="monotone" dataKey="planejado" name="Planejado (acumulado)" stroke="#5E6679" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="realizado" name="Realizado (acumulado)" stroke="#21418F" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="planejado" name="Planejado (acumulado)" stroke="#5E6066" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="realizado" name="Realizado (acumulado)" stroke="#856616" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -2693,7 +3290,7 @@ function TopContextBar({ cfg, update, derived, onOpenMobile, history }) {
         {office.nivel !== "nacional" && (
           <div className="fr-ctx-pill">
             <label htmlFor="ctx-uf">UF</label>
-            <select id="ctx-uf" value={cfg.uf} onChange={(e) => update({ uf: e.target.value })}>
+            <select id="ctx-uf" value={cfg.uf} onChange={(e) => update(mudarUf(cfg, e.target.value))}>
               {UF_DATA.map((u) => <option key={u.code} value={u.code}>{u.code}</option>)}
             </select>
           </div>
@@ -2702,7 +3299,7 @@ function TopContextBar({ cfg, update, derived, onOpenMobile, history }) {
           <div className="fr-ctx-pill">
             <label htmlFor="ctx-mun">Município</label>
             <select id="ctx-mun" value={cfg.municipioId} onChange={(e) => update({ municipioId: e.target.value })}>
-              {SP_MUNICIPIOS.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+              {getMunicipiosDaUf(cfg.uf).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           </div>
         )}
@@ -2864,8 +3461,15 @@ export default function App() {
   }), [log]);
 
   const derived = useMemo(() => computeAll(cfg, tracking), [cfg, tracking]);
+  // A faixa de incerteza deixou de ser um extra da aba Simulações: ela é o que
+  // a Visão Geral mostra. 3.000 iterações rodam em ~40 ms, então recalcular a
+  // cada mudança de premissa é barato. Semente fixa = resultado reprodutível.
+  const incerteza = useMemo(
+    () => runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 3000, seed: 42 }),
+    [cfg],
+  );
 
-  const viewProps = { cfg, update, derived, mode, setActiveView };
+  const viewProps = { cfg, update, derived, incerteza, mode, setActiveView };
 
   let body;
   switch (effectiveView) {
@@ -2880,7 +3484,7 @@ export default function App() {
     case "orcamento": body = <ViewOrcamento {...viewProps} />; break;
     case "cenarios": body = <ViewCenarios {...viewProps} />; break;
     case "simulacoes": body = <ViewSimulacoes {...viewProps} />; break;
-    case "dados": body = <ViewDados />; break;
+    case "dados": body = <ViewDados {...viewProps} />; break;
     case "relatorios":
       body = (
         <ViewRelatorios

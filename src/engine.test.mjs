@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import {
   defaultConfig, migrateConfig, computeAll, buildTerritories, getVagas,
   electoralRuleEngine, electorateEngine, funnelEngine, capacityEngine,
-  triangular, mulberry32, runMonteCarlo, deepMerge, territorialEngine,
-  CANDIDATE_THRESHOLD, SOBRAS_PARTY_THRESHOLD, UF_DATA, SP_MUNICIPIOS, CHANNEL_DEFS,
+  triangular, mulberry32, runMonteCarlo, defaultBounds, fmtSig, fmtFaixa, deepMerge, territorialEngine,
+  CANDIDATE_THRESHOLD, SOBRAS_PARTY_THRESHOLD, UF_DATA, MUNICIPIOS_POR_UF, getMunicipiosDaUf, PARAMS_TERRITORIAIS_PADRAO, FONTES, FONTE_DO_CAMPO, CHANNEL_DEFS,
   electionDates,
 } from "./engine.js";
 
@@ -112,26 +112,36 @@ test("meta acima do eleitorado que comparece gera alerta crítico", () => {
   assert.ok(d.eleitoradoEfetivo < cfg.voteGoal);
 });
 
-test("effectiveElectorate é efetivamente usado no cálculo", () => {
+test("votos esperados saem do comparecimento MEDIDO, não da premissa de abstenção", () => {
   const d = run(defaultConfig());
-  assert.equal(Math.round(d.eleitoradoEfetivo), Math.round(35e6 * 0.8));
+  // Soma dos votantes por território, cada um com o comparecimento que o TSE
+  // registrou naquele município. Antes era eleitorado × (1 - abstenção), o que
+  // fazia o seletor de ano de referência não mexer em nada.
+  const esperado = d.territories.reduce((a, t) => a + t.eleitores * t.comparecimento, 0);
+  assert.ok(Math.abs(d.eleitoradoEfetivo - esperado) < 1, "eleitoradoEfetivo deve somar os votantes medidos");
+  assert.notEqual(Math.round(d.eleitoradoEfetivo), Math.round(d.eleitoradoElegivel * d.turnoutRate));
+  assert.ok(d.comparecimentoHistorico > 0.5 && d.comparecimentoHistorico < 1);
   assert.ok(d.goalShareOfElectorate > 0 && d.goalShareOfElectorate < 1);
 });
 
 /* ---------------------- território -------------------------------------- */
 
-test("SP inclui o restante do estado — a meta não é 100% em 40% do eleitorado", () => {
+test("SP inclui o restante do estado — a meta não é 100% nos maiores municípios", () => {
   const d = run(defaultConfig());
   const resto = d.territories.find((t) => t.resto);
   assert.ok(resto, "esperava bucket 'Restante do estado'");
-  const soma = d.territories.reduce((a, t) => a + t.eleitoradoM, 0);
-  assert.ok(Math.abs(soma - 35.0) < 0.001, `eleitorado coberto ${soma} deveria fechar em 35M`);
+  const soma = d.territories.reduce((a, t) => a + t.eleitores, 0);
+  const uf = UF_DATA.find((u) => u.code === "SP");
+  assert.equal(soma, uf.eleitores, "a cobertura territorial deve fechar no eleitorado da UF");
   assert.ok(Math.abs(d.territories.reduce((a, t) => a + t.share, 0) - 1) < 1e-9);
 });
 
 test("histórico e comparecimento são critérios independentes", () => {
-  const t = buildTerritories(defaultConfig());
-  const capital = t.find((x) => x.id === "sp-capital");
+  const cfg = defaultConfig();
+  // "histórico" é julgamento da equipe; "comparecimento" é medição do TSE.
+  cfg.territorioParams = { "sp-sao-paulo": { historico: 0.9 } };
+  const t = buildTerritories(cfg);
+  const capital = t.find((x) => x.id === "sp-sao-paulo");
   assert.notEqual(capital.historicoNorm, capital.comparecimentoNorm);
   // e ambos estão normalizados em 0..1, como os demais critérios
   t.forEach((x) => {
@@ -311,4 +321,120 @@ test("ano de referência histórica muda o comparecimento usado", () => {
   const a = run({ ...cfg, uf: "MG", histRefYear: 2022 });
   const b = run({ ...cfg, uf: "MG", histRefYear: 2018 });
   assert.notEqual(a.territories[0].comparecimento, b.territories[0].comparecimento);
+});
+
+/* ---------------------- proveniência dos dados --------------------------- */
+
+test("todo campo de dado declara uma fonte existente", () => {
+  for (const [campo, fonteId] of Object.entries(FONTE_DO_CAMPO)) {
+    const f = FONTES[fonteId];
+    assert.ok(f, `campo ${campo} aponta para fonte inexistente ${fonteId}`);
+    for (const chave of ["orgao", "url", "dataReferencia", "metodo"]) {
+      assert.ok(f[chave], `fonte ${fonteId} sem ${chave}`);
+    }
+    assert.match(f.url, /^https:\/\//, `fonte ${fonteId} sem URL navegável`);
+  }
+});
+
+test("as 27 UFs têm eleitorado, comparecimento dos dois anos e vagas coerentes", () => {
+  assert.equal(UF_DATA.length, 27);
+  for (const u of UF_DATA) {
+    assert.ok(u.eleitores > 0, `${u.code} sem eleitorado`);
+    assert.ok(u.municipios > 0 && u.zonas > 0, `${u.code} sem municípios/zonas`);
+    for (const ano of [2022, 2018]) {
+      const c = u.hist[ano]?.comparecimento;
+      assert.ok(c > 0.5 && c < 1, `${u.code}/${ano} comparecimento implausível: ${c}`);
+    }
+    // CF art. 27: o triplo até 36; acima de 12 federais, +1 estadual por federal.
+    const esperado = u.vagasCamara <= 12 ? u.vagasCamara * 3 : 36 + (u.vagasCamara - 12);
+    assert.equal(u.vagasAssembleia, esperado, `${u.code}: vagas de Assembleia fora da regra do art. 27`);
+  }
+  assert.equal(UF_DATA.reduce((a, u) => a + u.vagasCamara, 0), 513, "a Câmara tem 513 cadeiras em 2026");
+});
+
+test("o comparecimento não segue um padrão sintético entre 2018 e 2022", () => {
+  // A versão anterior tinha 2018 = 2022 + 0,02 para TODAS as UFs, o que é o
+  // carimbo de dado inventado. Com dado real, o delta varia de sinal.
+  const deltas = UF_DATA.map((u) => u.hist[2018].comparecimento - u.hist[2022].comparecimento);
+  assert.ok(deltas.some((d) => d > 0) && deltas.some((d) => d < 0),
+    "esperava UFs com comparecimento maior e menor em 2018 do que em 2022");
+});
+
+test("trocar o ano de referência muda os votos esperados", () => {
+  const cfg = defaultConfig();
+  const a = run({ ...cfg, histRefYear: 2022 });
+  const b = run({ ...cfg, histRefYear: 2018 });
+  assert.notEqual(Math.round(a.eleitoradoEfetivo), Math.round(b.eleitoradoEfetivo));
+  assert.equal(a.anoReferencia, 2022);
+  assert.equal(b.anoReferencia, 2018);
+});
+
+test("toda UF tem recorte municipal, não só SP", () => {
+  for (const u of UF_DATA) {
+    const lista = getMunicipiosDaUf(u.code);
+    assert.ok(lista.length > 0, `${u.code} sem municípios detalhados`);
+    assert.ok(lista.length <= 12);
+    const soma = lista.reduce((a, m) => a + m.eleitores, 0);
+    assert.ok(soma <= u.eleitores, `${u.code}: municípios somam mais que a UF`);
+    for (let i = 1; i < lista.length; i++) {
+      assert.ok(lista[i - 1].eleitores >= lista[i].eleitores, `${u.code} fora de ordem`);
+    }
+  }
+});
+
+test("os quatro critérios sem fonte começam neutros e não desempatam nada", () => {
+  const t = buildTerritories(defaultConfig());
+  for (const campo of ["historico", "presenca", "capacidade", "logistica"]) {
+    assert.equal(PARAMS_TERRITORIAIS_PADRAO[campo], 0.5);
+    const distintos = new Set(t.map((x) => x[`${campo}Norm`]));
+    assert.equal(distintos.size, 1, `${campo} deveria ser igual para todos até a equipe informar`);
+  }
+});
+
+/* ---------------------- precisão honesta -------------------------------- */
+
+test("fmtSig corta a precisão falsa em vez de despejar todos os dígitos", () => {
+  assert.equal(fmtSig(1078431), "1,08 mi");
+  assert.equal(fmtSig(161765), "162 mil");
+  assert.equal(fmtSig(8), "8");
+  assert.equal(fmtSig(0), "0");
+  assert.equal(fmtSig(NaN), "—");
+  assert.equal(fmtSig(Infinity), "—");
+  assert.equal(fmtSig(-1250000), "-1,25 mi");
+  assert.match(fmtFaixa(781000, 1620000), /781 mil – 1,6 mi/);
+});
+
+test("a simulação devolve faixa para meta, contatos, diária e custo", () => {
+  const cfg = defaultConfig();
+  const r = runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 800, seed: 42 });
+  for (const chave of ["adjustedGoal", "contacts", "daily", "cost"]) {
+    const f = r[chave];
+    assert.ok(f, `faltou a faixa de ${chave}`);
+    assert.ok(f.p10 <= f.p50 && f.p50 <= f.p90, `${chave}: percentis fora de ordem`);
+    assert.ok(f.p90 > f.p10, `${chave}: faixa degenerada — a incerteza sumiu`);
+  }
+});
+
+test("o custo simulado envolve o custo determinístico", () => {
+  const cfg = defaultConfig();
+  const d = run(cfg);
+  const r = runMonteCarlo({ cfg, bounds: defaultBounds(cfg), iterations: 2000, seed: 42 });
+  assert.ok(r.cost.p10 <= d.totalCost && d.totalCost <= r.cost.p90,
+    `custo determinístico ${d.totalCost} fora da faixa ${r.cost.p10}–${r.cost.p90}`);
+});
+
+test("mesma semente, mesma faixa — a simulação é reprodutível", () => {
+  const cfg = defaultConfig();
+  const b = defaultBounds(cfg);
+  const a1 = runMonteCarlo({ cfg, bounds: b, iterations: 500, seed: 7 });
+  const a2 = runMonteCarlo({ cfg, bounds: b, iterations: 500, seed: 7 });
+  assert.deepEqual(a1.contacts, a2.contacts);
+});
+
+test("defaultBounds deriva os limites das premissas do plano", () => {
+  const b = defaultBounds({ ...defaultConfig(), abstentionRate: 0.30, fidelityRate: 0.70 });
+  assert.equal(b.abstentionMin, 0.23);
+  assert.equal(b.abstentionMax, 0.37);
+  assert.equal(b.fidelityMin, 0.58);
+  assert.equal(b.fidelityMax, 0.78);
 });

@@ -5,6 +5,13 @@
    podem ser portadas para um backend (Node/Python) sem alteração.
    ========================================================================== */
 
+import {
+  FONTES, FONTE_DO_CAMPO, ANOS_REFERENCIA, ELEITORADO_NACIONAL,
+  UF_DATA, MUNICIPIOS_POR_UF,
+} from "./dados-tse.js";
+
+export { FONTES, FONTE_DO_CAMPO, ANOS_REFERENCIA, ELEITORADO_NACIONAL, UF_DATA, MUNICIPIOS_POR_UF };
+
 /* ---------------------------- utilidades ---------------------------- */
 
 export const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
@@ -27,6 +34,36 @@ export function fmtMoney(n) {
   if (!isFiniteNum(n)) return "—";
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
 }
+/**
+ * Número com ALGARISMOS SIGNIFICATIVOS, não com todos os dígitos que a conta
+ * produziu. "1.078.431 contatos" sugere precisão à unidade num resultado que
+ * saiu de uma taxa de conversão chutada; "1,08 mi" diz o que de fato se sabe.
+ */
+export function fmtSig(n, sig = 3) {
+  if (!Number.isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs === 0) return "0";
+  if (abs < 1000) {
+    const casas = Math.max(0, sig - 1 - Math.floor(Math.log10(abs)));
+    return n.toLocaleString("pt-BR", { maximumFractionDigits: Math.min(casas, 2) });
+  }
+  const escalas = [
+    { limite: 1e9, div: 1e9, suf: " bi" },
+    { limite: 1e6, div: 1e6, suf: " mi" },
+    { limite: 1e3, div: 1e3, suf: " mil" },
+  ];
+  const e = escalas.find((x) => abs >= x.limite);
+  const v = n / e.div;
+  const casas = Math.max(0, sig - 1 - Math.floor(Math.log10(Math.abs(v))));
+  return v.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: Math.min(casas, 2) }) + e.suf;
+}
+
+/** Faixa "a – b" em algarismos significativos. */
+export function fmtFaixa(min, max, sig = 2) {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return "—";
+  return `${fmtSig(min, sig)} – ${fmtSig(max, sig)}`;
+}
+
 export function fmtSigned(n, formatter = fmtInt) {
   if (!isFiniteNum(n)) return "—";
   return `${n >= 0 ? "+" : "−"}${formatter(Math.abs(n))}`;
@@ -375,13 +412,35 @@ const summarize = (sorted) => ({
  * configurado, não uma taxa média única. A incerteza de conversão entra como
  * multiplicador aplicado a cada canal, preservando as cadeias próprias.
  */
+/**
+ * Limites padrão da incerteza, derivados das próprias premissas do plano.
+ * Vivia dentro da tela de Simulações; subiu para o motor porque a faixa deixou
+ * de ser um extra escondido e passou a ser o que a Visão Geral exibe.
+ */
+export function defaultBounds(cfg) {
+  return {
+    abstentionMin: Math.max(0, Math.round((cfg.abstentionRate - 0.07) * 100) / 100),
+    abstentionMax: Math.min(1, Math.round((cfg.abstentionRate + 0.07) * 100) / 100),
+    fidelityMin: Math.max(0, Math.round((cfg.fidelityRate - 0.12) * 100) / 100),
+    fidelityMax: Math.min(1, Math.round((cfg.fidelityRate + 0.08) * 100) / 100),
+    conversionMultMin: 0.7,
+    conversionMultMax: 1.3,
+    iterations: 3000,
+  };
+}
+
 export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, channelDefs = CHANNEL_DEFS }) {
   const rng = mulberry32(seed);
   const n = Math.max(1, Math.min(50000, Math.floor(iterations) || 0));
   const adjustedGoals = [];
   const contactsArr = [];
   const dailyArr = [];
+  const costArr = [];
   const enabled = channelDefs.filter((def) => cfg.channels?.[def.id]?.enabled);
+  // O custo depende dos contatos, então ele carrega a mesma incerteza — antes
+  // a simulação parava nos contatos e o orçamento seguia exibido como exato.
+  const preset = getScenarioPreset(cfg);
+  const eventos = (cfg.team?.eventosDia || 0) * Math.max(0, cfg.agenda?.diasEventos || 0);
 
   for (let i = 0; i < n; i++) {
     const abst = triangular(rng, bounds.abstentionMin, cfg.abstentionRate, bounds.abstentionMax);
@@ -399,12 +458,18 @@ export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, chann
     adjustedGoals.push(adj);
     contactsArr.push(contacts);
     dailyArr.push(funnelEngine.dailyTarget(contacts, cfg.campaignDays));
+    costArr.push(budgetEngine.totalCost({
+      totalContacts: contacts, custoPorContato: cfg.budget?.custoPorContato || 0,
+      eventos, custoPorEvento: cfg.budget?.custoPorEvento || 0,
+      diasAtivos: cfg.campaignDays, custoLogisticoDia: cfg.budget?.custoLogisticoDia || 0,
+    }) * (preset.costMultiplier || 1));
   }
 
   const finiteContacts = contactsArr.filter(isFiniteNum);
   const sortedGoals = [...adjustedGoals].filter(isFiniteNum).sort((a, b) => a - b);
   const sortedContacts = [...finiteContacts].sort((a, b) => a - b);
   const sortedDaily = dailyArr.filter(isFiniteNum).sort((a, b) => a - b);
+  const sortedCost = costArr.filter(isFiniteNum).sort((a, b) => a - b);
 
   return {
     iterations: n,
@@ -412,6 +477,7 @@ export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, chann
     adjustedGoal: summarize(sortedGoals),
     contacts: summarize(sortedContacts),
     daily: summarize(sortedDaily),
+    cost: summarize(sortedCost),
     contactsHistogram: histogram(finiteContacts, 24),
     raw: { contacts: sortedContacts },
   };
@@ -420,12 +486,16 @@ export function runMonteCarlo({ cfg, bounds, iterations = 3000, seed = 42, chann
 /* ============================================================================
    DADOS DE REFERÊNCIA
 
-   Proveniência: os números de eleitorado por UF e o número de vagas na Câmara
-   correspondem à ordem de grandeza real, mas são uma FOTOGRAFIA CONGELADA no
-   código — não vêm de nenhuma consulta ao TSE. Por isso são classificados como
-   "histórico" (referência de apoio), nunca como "oficial". A classificação
-   "oficial" fica reservada ao que só pode vir de um conector real ou da
-   própria legislação (ex.: datas do calendário eleitoral).
+   Proveniência: TUDO o que é dado externo mora em src/dados-tse.js, gerado por
+   scripts/gerar-dados-tse.mjs a partir dos arquivos originais do Portal de
+   Dados Abertos do TSE. Cada campo declara sua fonte em FONTE_DO_CAMPO, e cada
+   fonte declara órgão, dataset, URL, data de referência e método de apuração.
+
+   O que NÃO é dado e por isso não mora lá: desempenho histórico da candidatura,
+   presença de campanha, capacidade instalada e dificuldade logística de cada
+   território. Não existe fonte pública para nenhum dos quatro — são julgamentos
+   da equipe. Entram como PREMISSA editável, com valor neutro por padrão, para
+   que ninguém confunda opinião com medição.
    ========================================================================== */
 
 export const PROV = {
@@ -435,53 +505,47 @@ export const PROV = {
   ESTIMATIVA: "estimativa",
 };
 
-export const UF_DATA = [
-  { code: "SP", name: "São Paulo", regiao: "Sudeste", eleitoradoM: 35.0, vagasCamara: 70, vagasAssembleia: 94, municipios: 645, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "MG", name: "Minas Gerais", regiao: "Sudeste", eleitoradoM: 16.5, vagasCamara: 53, vagasAssembleia: 77, municipios: 853, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "RJ", name: "Rio de Janeiro", regiao: "Sudeste", eleitoradoM: 13.0, vagasCamara: 46, vagasAssembleia: 70, municipios: 92, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "BA", name: "Bahia", regiao: "Nordeste", eleitoradoM: 11.2, vagasCamara: 39, vagasAssembleia: 63, municipios: 417, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "RS", name: "Rio Grande do Sul", regiao: "Sul", eleitoradoM: 8.8, vagasCamara: 31, vagasAssembleia: 55, municipios: 497, hist: { 2022: { comparecimento: 0.82, abstencao: 0.18 }, 2018: { comparecimento: 0.84, abstencao: 0.16 } } },
-  { code: "PR", name: "Paraná", regiao: "Sul", eleitoradoM: 8.4, vagasCamara: 30, vagasAssembleia: 54, municipios: 399, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "CE", name: "Ceará", regiao: "Nordeste", eleitoradoM: 7.1, vagasCamara: 22, vagasAssembleia: 46, municipios: 184, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "PE", name: "Pernambuco", regiao: "Nordeste", eleitoradoM: 7.0, vagasCamara: 25, vagasAssembleia: 49, municipios: 185, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "PA", name: "Pará", regiao: "Norte", eleitoradoM: 5.9, vagasCamara: 17, vagasAssembleia: 41, municipios: 144, hist: { 2022: { comparecimento: 0.74, abstencao: 0.26 }, 2018: { comparecimento: 0.76, abstencao: 0.24 } } },
-  { code: "SC", name: "Santa Catarina", regiao: "Sul", eleitoradoM: 5.7, vagasCamara: 16, vagasAssembleia: 40, municipios: 295, hist: { 2022: { comparecimento: 0.83, abstencao: 0.17 }, 2018: { comparecimento: 0.85, abstencao: 0.15 } } },
-  { code: "MA", name: "Maranhão", regiao: "Nordeste", eleitoradoM: 4.9, vagasCamara: 18, vagasAssembleia: 42, municipios: 217, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "GO", name: "Goiás", regiao: "Centro-Oeste", eleitoradoM: 4.8, vagasCamara: 17, vagasAssembleia: 41, municipios: 246, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "PB", name: "Paraíba", regiao: "Nordeste", eleitoradoM: 3.0, vagasCamara: 12, vagasAssembleia: 36, municipios: 223, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "ES", name: "Espírito Santo", regiao: "Sudeste", eleitoradoM: 2.9, vagasCamara: 10, vagasAssembleia: 30, municipios: 78, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "AM", name: "Amazonas", regiao: "Norte", eleitoradoM: 2.6, vagasCamara: 8, vagasAssembleia: 24, municipios: 62, hist: { 2022: { comparecimento: 0.72, abstencao: 0.28 }, 2018: { comparecimento: 0.74, abstencao: 0.26 } } },
-  { code: "RN", name: "Rio Grande do Norte", regiao: "Nordeste", eleitoradoM: 2.6, vagasCamara: 8, vagasAssembleia: 24, municipios: 167, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "MT", name: "Mato Grosso", regiao: "Centro-Oeste", eleitoradoM: 2.5, vagasCamara: 8, vagasAssembleia: 24, municipios: 141, hist: { 2022: { comparecimento: 0.78, abstencao: 0.22 }, 2018: { comparecimento: 0.80, abstencao: 0.20 } } },
-  { code: "PI", name: "Piauí", regiao: "Nordeste", eleitoradoM: 2.5, vagasCamara: 10, vagasAssembleia: 30, municipios: 224, hist: { 2022: { comparecimento: 0.80, abstencao: 0.20 }, 2018: { comparecimento: 0.82, abstencao: 0.18 } } },
-  { code: "AL", name: "Alagoas", regiao: "Nordeste", eleitoradoM: 2.3, vagasCamara: 9, vagasAssembleia: 27, municipios: 102, hist: { 2022: { comparecimento: 0.76, abstencao: 0.24 }, 2018: { comparecimento: 0.78, abstencao: 0.22 } } },
-  { code: "DF", name: "Distrito Federal", regiao: "Centro-Oeste", eleitoradoM: 2.2, vagasCamara: 8, vagasAssembleia: 24, municipios: 1, hist: { 2022: { comparecimento: 0.83, abstencao: 0.17 }, 2018: { comparecimento: 0.85, abstencao: 0.15 } } },
-  { code: "MS", name: "Mato Grosso do Sul", regiao: "Centro-Oeste", eleitoradoM: 1.9, vagasCamara: 8, vagasAssembleia: 24, municipios: 79, hist: { 2022: { comparecimento: 0.81, abstencao: 0.19 }, 2018: { comparecimento: 0.83, abstencao: 0.17 } } },
-  { code: "SE", name: "Sergipe", regiao: "Nordeste", eleitoradoM: 1.7, vagasCamara: 8, vagasAssembleia: 24, municipios: 75, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "RO", name: "Rondônia", regiao: "Norte", eleitoradoM: 1.2, vagasCamara: 8, vagasAssembleia: 24, municipios: 52, hist: { 2022: { comparecimento: 0.77, abstencao: 0.23 }, 2018: { comparecimento: 0.79, abstencao: 0.21 } } },
-  { code: "TO", name: "Tocantins", regiao: "Norte", eleitoradoM: 1.1, vagasCamara: 8, vagasAssembleia: 24, municipios: 139, hist: { 2022: { comparecimento: 0.79, abstencao: 0.21 }, 2018: { comparecimento: 0.81, abstencao: 0.19 } } },
-  { code: "AC", name: "Acre", regiao: "Norte", eleitoradoM: 0.6, vagasCamara: 8, vagasAssembleia: 24, municipios: 22, hist: { 2022: { comparecimento: 0.75, abstencao: 0.25 }, 2018: { comparecimento: 0.77, abstencao: 0.23 } } },
-  { code: "AP", name: "Amapá", regiao: "Norte", eleitoradoM: 0.55, vagasCamara: 8, vagasAssembleia: 24, municipios: 16, hist: { 2022: { comparecimento: 0.73, abstencao: 0.27 }, 2018: { comparecimento: 0.75, abstencao: 0.25 } } },
-  { code: "RR", name: "Roraima", regiao: "Norte", eleitoradoM: 0.4, vagasCamara: 8, vagasAssembleia: 24, municipios: 15, hist: { 2022: { comparecimento: 0.74, abstencao: 0.26 }, 2018: { comparecimento: 0.76, abstencao: 0.24 } } },
-];
+/** Classifica um campo territorial: veio de fonte ou é julgamento da equipe? */
+export const PROV_DO_CAMPO = {
+  eleitorado: PROV.OFICIAL,
+  comparecimento: PROV.HISTORICO,
+  historico: PROV.PREMISSA,
+  presenca: PROV.PREMISSA,
+  capacidade: PROV.PREMISSA,
+  logistica: PROV.PREMISSA,
+};
 
-/* Recorte de municípios de SP. `historico` (desempenho anterior da candidatura
-   naquele território) e `comparecimento` (taxa de comparecimento local) agora
-   são campos INDEPENDENTES — antes ambos recebiam o mesmo valor derivado, o
-   que fazia dois pesos diferentes incidirem sobre a mesma variável. */
-export const SP_MUNICIPIOS = [
-  { id: "sp-capital", name: "São Paulo (capital)", eleitoradoM: 9.4, zonas: 79, historico: 0.62, comparecimento: 0.78, presenca: 0.55, capacidade: 0.6, logistica: 0.35 },
-  { id: "guarulhos", name: "Guarulhos", eleitoradoM: 1.0, zonas: 6, historico: 0.44, comparecimento: 0.77, presenca: 0.4, capacidade: 0.45, logistica: 0.3 },
-  { id: "campinas", name: "Campinas", eleitoradoM: 0.9, zonas: 5, historico: 0.51, comparecimento: 0.80, presenca: 0.5, capacidade: 0.55, logistica: 0.4 },
-  { id: "sbc", name: "São Bernardo do Campo", eleitoradoM: 0.65, zonas: 3, historico: 0.58, comparecimento: 0.80, presenca: 0.45, capacidade: 0.5, logistica: 0.35 },
-  { id: "santo-andre", name: "Santo André", eleitoradoM: 0.58, zonas: 3, historico: 0.49, comparecimento: 0.81, presenca: 0.4, capacidade: 0.45, logistica: 0.4 },
-  { id: "osasco", name: "Osasco", eleitoradoM: 0.55, zonas: 2, historico: 0.37, comparecimento: 0.76, presenca: 0.35, capacidade: 0.4, logistica: 0.3 },
-  { id: "santos", name: "Santos", eleitoradoM: 0.34, zonas: 2, historico: 0.55, comparecimento: 0.82, presenca: 0.5, capacidade: 0.5, logistica: 0.5 },
-  { id: "sjc", name: "São José dos Campos", eleitoradoM: 0.53, zonas: 2, historico: 0.41, comparecimento: 0.80, presenca: 0.42, capacidade: 0.48, logistica: 0.45 },
-];
+/**
+ * Os quatro critérios sem fonte pública começam NEUTROS (0,5 para todos).
+ * Valor neutro importa: normalizeField divide pelo maior da lista, então
+ * quatro valores iguais viram 1,0 para todo mundo e o critério não desempata
+ * nada até que a equipe efetivamente informe o que sabe. A versão anterior
+ * trazia números inventados por território (São Paulo 0,62 de "histórico",
+ * Osasco 0,37) que pareciam medição e enviesavam a distribuição da meta.
+ */
+export const PARAMS_TERRITORIAIS_PADRAO = { historico: 0.5, presenca: 0.5, capacidade: 0.5, logistica: 0.5 };
+export const PARAMS_TERRITORIAIS_CAMPOS = ["historico", "presenca", "capacidade", "logistica"];
 
-/** Município genérico usado quando a UF não tem recorte detalhado. */
-export const GENERIC_MUNICIPIO = { historico: 0.45, comparecimento: 0.79, presenca: 0.5, capacidade: 0.5, logistica: 0.3 };
+/** Parâmetros informados pela equipe para um território, com o padrão neutro. */
+export function getParamsTerritorio(cfg, id) {
+  const salvos = cfg?.territorioParams?.[id] || {};
+  const out = { ...PARAMS_TERRITORIAIS_PADRAO };
+  for (const c of PARAMS_TERRITORIAIS_CAMPOS) {
+    if (isFiniteNum(salvos[c])) out[c] = clamp01(salvos[c]);
+  }
+  return out;
+}
+
+/** Municípios detalhados da UF (os 12 maiores por eleitorado). */
+export function getMunicipiosDaUf(uf) {
+  return MUNICIPIOS_POR_UF[uf] || [];
+}
+
+/** Comparecimento do território no ano de referência, com queda para 2022. */
+export function comparecimentoDe(entidade, ano) {
+  const h = entidade?.hist || {};
+  return h[ano]?.comparecimento ?? h[2022]?.comparecimento ?? h[2018]?.comparecimento ?? 0;
+}
 
 export const OFFICES = [
   { id: "PRESIDENTE", label: "Presidente da República", tipo: "majoritario", nivel: "nacional", vice: "VICE_PRESIDENTE" },
@@ -647,7 +711,7 @@ export function defaultConfig() {
     histRefYear: 2022,
     office: "DEPUTADO_FEDERAL",
     uf: "SP",
-    municipioId: "sp-capital",
+    municipioId: "sp-sao-paulo",
     scenarioId: "central",
     voteGoal: 110000,
     campaignDays: 45,
@@ -656,7 +720,9 @@ export function defaultConfig() {
     channels: defaultChannelState(),
     network: { numLiderancas: 400, fanout: 30, taxaAtivacao: 0.6, taxaSobreposicao: 0.25, camadas: 3 },
     territorialWeights: { eleitorado: 0.40, historico: 0.20, comparecimento: 0.10, presenca: 0.15, capacidade: 0.10, logistica: 0.05 },
-    territoriosSelecionados: SP_MUNICIPIOS.map((m) => m.id),
+    territoriosSelecionados: getMunicipiosDaUf("SP").map((m) => m.id),
+    // Julgamentos da equipe por território (sem fonte externa). Vazio = neutro.
+    territorioParams: {},
     incluirRestoDoEstado: true,
     publicos: { tematicos: [], faixas: FAIXAS_ETARIAS_PADRAO },
     team: { coordenadores: 8, mobilizadores: 180, horasDia: 3, contatosHora: 6, reunioesDia: 4, contatosPorReuniao: 25, eventosDia: 0.3, contatosPorEvento: 150 },
@@ -742,7 +808,7 @@ export function getUf(cfg) {
   return UF_DATA.find((u) => u.code === cfg.uf) || UF_DATA[0];
 }
 export function getMunicipio(cfg) {
-  return SP_MUNICIPIOS.find((m) => m.id === cfg.municipioId) || null;
+  return getMunicipiosDaUf(cfg.uf).find((m) => m.id === cfg.municipioId) || null;
 }
 
 /** Vagas em disputa — derivadas do cargo + UF (antes eram um "70" fixo que não
@@ -768,58 +834,65 @@ export function getVagas(cfg) {
 export function buildTerritories(cfg) {
   const uf = getUf(cfg);
   const office = getOffice(cfg);
-  const ano = cfg.histRefYear || 2022;
-  const ufComparecimento = uf.hist[ano]?.comparecimento ?? uf.hist[2022].comparecimento;
+  const ano = ANOS_REFERENCIA.includes(cfg.histRefYear) ? cfg.histRefYear : ANOS_REFERENCIA[0];
+  const ufComparecimento = comparecimentoDe(uf, ano);
+  const municipios = getMunicipiosDaUf(cfg.uf);
+
+  /** Monta o território juntando dado medido (eleitorado, comparecimento) com
+   *  os quatro parâmetros que a equipe informa. */
+  const montar = (base) => ({
+    ...base,
+    ...getParamsTerritorio(cfg, base.id),
+    eleitorado: base.eleitores,
+  });
 
   if (office.nivel === "municipal") {
     const m = getMunicipio(cfg);
-    const src = m || { name: `${uf.name} (município não detalhado)`, eleitoradoM: uf.eleitoradoM / Math.max(1, uf.municipios), ...GENERIC_MUNICIPIO };
-    return territorialEngine.normalizeAll([{
-      id: m?.id || `${uf.code}-municipio`, name: src.name, eleitoradoM: src.eleitoradoM,
-      eleitorado: src.eleitoradoM, historico: src.historico, comparecimento: src.comparecimento ?? ufComparecimento,
-      presenca: src.presenca, capacidade: src.capacidade, logistica: src.logistica,
-    }]);
+    // Sem recorte detalhado para o município escolhido, usa a média da UF em vez
+    // de fingir um número: eleitorado da UF dividido pelos municípios dela.
+    const base = m
+      ? { id: m.id, name: m.name, eleitores: m.eleitores, zonas: m.zonas, comparecimento: comparecimentoDe(m, ano), estimado: false }
+      : { id: `${uf.code}-municipio-medio`, name: `${uf.name} — município médio`,
+          eleitores: Math.round(uf.eleitores / Math.max(1, uf.municipios)), zonas: null,
+          comparecimento: ufComparecimento, estimado: true };
+    return territorialEngine.normalizeAll([montar(base)]);
   }
 
   if (office.nivel === "nacional") {
-    return territorialEngine.normalizeAll(UF_DATA.map((u) => ({
-      id: u.code, name: u.name, eleitoradoM: u.eleitoradoM,
-      eleitorado: u.eleitoradoM,
-      historico: GENERIC_MUNICIPIO.historico,
-      comparecimento: u.hist[ano]?.comparecimento ?? u.hist[2022].comparecimento,
-      presenca: GENERIC_MUNICIPIO.presenca, capacidade: GENERIC_MUNICIPIO.capacidade,
-      logistica: GENERIC_MUNICIPIO.logistica,
+    return territorialEngine.normalizeAll(UF_DATA.map((u) => montar({
+      id: u.code, name: u.name, eleitores: u.eleitores, zonas: u.zonas,
+      comparecimento: comparecimentoDe(u, ano), estimado: false,
     })));
   }
 
-  // Nível estadual
-  if (cfg.uf === "SP") {
-    const selecionados = SP_MUNICIPIOS.filter((m) => cfg.territoriosSelecionados.includes(m.id));
-    const base = (selecionados.length ? selecionados : SP_MUNICIPIOS).map((m) => ({
-      id: m.id, name: m.name, eleitoradoM: m.eleitoradoM, resto: false,
-      eleitorado: m.eleitoradoM, historico: m.historico, comparecimento: m.comparecimento,
-      presenca: m.presenca, capacidade: m.capacidade, logistica: m.logistica,
+  // Nível estadual: os municípios detalhados da UF + o que sobra do estado.
+  if (municipios.length) {
+    const escolhidos = municipios.filter((m) => cfg.territoriosSelecionados.includes(m.id));
+    const lista = escolhidos.length ? escolhidos : municipios;
+    const base = lista.map((m) => montar({
+      id: m.id, name: m.name, eleitores: m.eleitores, zonas: m.zonas,
+      comparecimento: comparecimentoDe(m, ano), resto: false, estimado: false,
     }));
     // Bucket do restante do estado: sem ele, 100% da meta era distribuída entre
-    // municípios que somam ~40% do eleitorado de SP, assumindo implicitamente
-    // zero voto nos outros 60%.
-    const cobertura = base.reduce((a, t) => a + t.eleitoradoM, 0);
-    const restante = Math.max(0, uf.eleitoradoM - cobertura);
-    if (cfg.incluirRestoDoEstado && restante > 0.01) {
-      base.push({
-        id: "__resto__", name: "Restante do estado", eleitoradoM: restante, resto: true,
-        eleitorado: restante, historico: 0.15, comparecimento: ufComparecimento,
-        presenca: 0.10, capacidade: 0.12, logistica: 0.85,
-      });
+    // municípios que somam uma fração do eleitorado da UF, assumindo
+    // implicitamente zero voto em todo o resto.
+    const cobertura = base.reduce((a, t) => a + t.eleitores, 0);
+    const restante = Math.max(0, uf.eleitores - cobertura);
+    if (cfg.incluirRestoDoEstado && restante > 0) {
+      const municipiosRestantes = Math.max(0, uf.municipios - lista.length);
+      base.push(montar({
+        id: "__resto__", name: `Restante do estado (${fmtInt(municipiosRestantes)} municípios)`,
+        eleitores: restante, zonas: Math.max(0, uf.zonas - base.reduce((a, t) => a + (t.zonas || 0), 0)),
+        comparecimento: ufComparecimento, resto: true, estimado: false,
+      }));
     }
     return territorialEngine.normalizeAll(base);
   }
 
-  return territorialEngine.normalizeAll([{
-    id: uf.code, name: uf.name, eleitoradoM: uf.eleitoradoM, resto: false,
-    eleitorado: uf.eleitoradoM, historico: GENERIC_MUNICIPIO.historico, comparecimento: ufComparecimento,
-    presenca: GENERIC_MUNICIPIO.presenca, capacidade: GENERIC_MUNICIPIO.capacidade, logistica: GENERIC_MUNICIPIO.logistica,
-  }]);
+  return territorialEngine.normalizeAll([montar({
+    id: uf.code, name: uf.name, eleitores: uf.eleitores, zonas: uf.zonas,
+    comparecimento: ufComparecimento, resto: false, estimado: false,
+  })]);
 }
 
 /**
@@ -841,26 +914,34 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   const territoriesRaw = buildTerritories(cfg);
   const distributed = territorialEngine.distributeGoal(territoriesRaw, cfg.territorialWeights, adjustedGoal);
   const weightSum = Object.values(cfg.territorialWeights).reduce((a, b) => a + b, 0);
-  const eleitoradoTotalM = distributed.reduce((a, t) => a + t.eleitoradoM, 0);
+  const eleitoradoTotal = distributed.reduce((a, t) => a + t.eleitores, 0);
   // `penetracaoNecessaria` torna auditável o resultado da ponderação: quanto
   // dos votos daquele território a meta territorial exige. É o que revela um
   // peso mal calibrado — um território pequeno com score alto passa a mostrar
   // uma penetração implausível em vez de esconder o problema em um "score".
+  //
+  // O comparecimento usado aqui é o MEDIDO naquele território no ano de
+  // referência, não a premissa global de abstenção. São coisas diferentes: a
+  // premissa diz o que a equipe espera do pleito que vem; o comparecimento
+  // histórico é o que de fato aconteceu, e é ele que diferencia um território
+  // do outro. Antes, os dois se confundiam — o seletor de ano de referência
+  // não mexia em nenhum número de saída.
   const territories = distributed.map((t) => {
-    const votantes = electorateEngine.effectiveElectorate(t.eleitoradoM * 1e6, turnoutRate);
+    const votantes = Math.max(0, t.eleitores) * clamp01(t.comparecimento);
     return {
       ...t,
-      eleitoradoShare: safeDiv(t.eleitoradoM, eleitoradoTotalM),
+      eleitoradoShare: safeDiv(t.eleitores, eleitoradoTotal),
       votantesEstimados: votantes,
       penetracaoNecessaria: safeDiv(t.metaTerritorial, votantes),
     };
   });
 
-  const eleitoradoElegivel = territories.reduce((a, t) => a + t.eleitoradoM, 0) * 1e6;
-  const eleitoradoEfetivo = electorateEngine.effectiveElectorate(eleitoradoElegivel, turnoutRate);
+  const eleitoradoElegivel = territories.reduce((a, t) => a + t.eleitores, 0);
+  const eleitoradoEfetivo = territories.reduce((a, t) => a + t.votantesEstimados, 0);
+  const comparecimentoHistorico = safeDiv(eleitoradoEfetivo, eleitoradoElegivel);
+  const anoReferenciaEfetivo = ANOS_REFERENCIA.includes(cfg.histRefYear) ? cfg.histRefYear : ANOS_REFERENCIA[0];
   const territoriosPrioritarios = territories.filter((t) => !t.resto);
-  const eleitoresAlvo = electorateEngine.effectiveElectorate(
-    territoriosPrioritarios.reduce((a, t) => a + t.eleitoradoM, 0) * 1e6, turnoutRate);
+  const eleitoresAlvo = territoriosPrioritarios.reduce((a, t) => a + t.votantesEstimados, 0);
   const goalShareOfElectorate = safeDiv(cfg.voteGoal, eleitoradoEfetivo);
 
   /* ---- canais ---- */
@@ -997,16 +1078,16 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
     push("atencao", `A meta equivale a ${fmtPct(goalShareOfElectorate)} dos votos esperados na circunscrição — muito alto para uma disputa proporcional. Revise a meta ou a circunscrição.`);
   }
   if (adjustedGoal > eleitoradoEfetivo && eleitoradoEfetivo > 0 && cfg.voteGoal <= eleitoradoEfetivo) {
-    push("atencao", `A meta ajustada (${fmtInt(adjustedGoal)}) supera o eleitorado que deve comparecer (${fmtInt(eleitoradoEfetivo)}): as premissas de abstenção e fidelidade tornam a meta original inalcançável.`);
+    push("atencao", `A meta ajustada (cerca de ${fmtSig(adjustedGoal)}) supera o eleitorado que deve comparecer (${fmtInt(eleitoradoEfetivo)}): as premissas de abstenção e fidelidade tornam a meta original inalcançável.`);
   }
   if (capacityStatus === "insuficiente") {
-    push("critico", `Capacidade operacional diária (${fmtInt(dailyCapacity)} contatos) abaixo da demanda diária (${fmtInt(dailyContacts)} contatos).`);
+    push("critico", `Capacidade operacional diária (${fmtInt(dailyCapacity)} contatos) abaixo da demanda diária (~${fmtSig(dailyContacts)} contatos).`);
   }
   if (campaignCapacityStatus === "insuficiente" && isFiniteNum(totalContactsNeeded)) {
-    push("critico", `Somando os dias de rua e de eventos da Agenda, a estrutura entrega ${fmtInt(campaignCapacity)} contatos no período — a meta exige ${fmtInt(totalContactsNeeded)}.`);
+    push("critico", `Somando os dias de rua e de eventos da Agenda, a estrutura entrega ${fmtInt(campaignCapacity)} contatos no período — a meta exige cerca de ${fmtSig(totalContactsNeeded)}.`);
   }
   if (totalCost > cfg.budget.orcamentoTotal) {
-    push("atencao", `Custo estimado (${fmtMoney(totalCost)}) acima do orçamento disponível (${fmtMoney(cfg.budget.orcamentoTotal)}).`);
+    push("atencao", `Custo estimado (cerca de ${fmtSig(totalCost)}) acima do orçamento disponível (${fmtMoney(cfg.budget.orcamentoTotal)}).`);
   }
   const maxChannelShare = enabledChannels.reduce((max, c) => Math.max(max, c.share), 0);
   if (maxChannelShare > 0.6) {
@@ -1047,7 +1128,22 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
   if (planejado > 0 && ritmoVsEsperado !== null && ritmoVsEsperado < 0.85) {
     push("atencao", `Ritmo abaixo do plano: ${fmtInt(realizado)} contatos registrados contra ${fmtInt(esperadoAteAgora)} esperados até aqui (${fmtPct(ritmoVsEsperado)}).`);
   }
-  push("info", "Os dados de eleitorado, comparecimento e território desta versão são uma referência congelada no código — conecte o Portal de Dados Abertos do TSE e o IBGE antes de uso operacional real.");
+  // Consistência entre o ano do pleito escolhido na barra de contexto e a
+  // janela da Agenda. Antes, trocar 2026 por 2028 deixava "dias restantes"
+  // contando para a eleição antiga, e o único aviso era um texto cinza
+  // escondido dentro de um card da Agenda.
+  const datasDoPleito = electionDates(cfg.eleicaoAno);
+  if (datasDoPleito && cfg.agenda?.dataFim && cfg.agenda.dataFim !== datasDoPleito.primeiroTurno) {
+    const anoDaAgenda = String(cfg.agenda.dataFim).slice(0, 4);
+    const nivel = anoDaAgenda === String(cfg.eleicaoAno) ? "atencao" : "critico";
+    push(nivel, `A data final da campanha (${cfg.agenda.dataFim}) não é a data do 1º turno de ${cfg.eleicaoAno} (${datasDoPleito.primeiroTurno}). Todo prazo do plano — dias restantes, meta diária — está sendo contado para a data errada. Ajuste em Agenda.`);
+  }
+  // A premissa de abstenção contra o que de fato foi medido na circunscrição.
+  const abstencaoMedida = 1 - comparecimentoHistorico;
+  if (comparecimentoHistorico > 0 && Math.abs(cfg.abstentionRate - abstencaoMedida) > 0.05) {
+    push("atencao", `A premissa de abstenção (${fmtPct(cfg.abstentionRate)}) está distante da abstenção medida na circunscrição em ${anoReferenciaEfetivo} (${fmtPct(abstencaoMedida)}). Confira em Meta Eleitoral.`);
+  }
+  push("info", `Eleitorado e comparecimento vêm dos arquivos do Portal de Dados Abertos do TSE (eleitorado de ${FONTES.ELEITORADO_2026.dataReferencia}; comparecimento apurado em ${anoReferenciaEfetivo}). São uma fotografia: o app não consulta o TSE em tempo real. Veja origem, método e link de cada número em Dados.`);
 
   return {
     office, uf, preset, scenario, turnoutRate, adjustedGoal,
@@ -1056,6 +1152,7 @@ export function computeAll(cfg, tracking = { realizado: 0, planejado: 0, entrada
     dailyContacts, weeklyContacts, diasCorridos, diasAtivosAgenda, diasRestantes, diasDecorridos,
     territories, territoriosPrioritarios, weightSum,
     eleitoradoElegivel, eleitoradoEfetivo, eleitoresAlvo, goalShareOfElectorate,
+    comparecimentoHistorico, anoReferencia: anoReferenciaEfetivo,
     dailyCapacity, dailyCapacityBase, capacityGap, capacityStatus,
     campaignCapacity, campaignCapacityGap, campaignCapacityStatus,
     totalCost, totalCostBase, costPerSupport, budgetGap, eventosTotal,
